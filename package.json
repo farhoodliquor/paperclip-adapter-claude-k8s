@@ -1,8 +1,16 @@
 {
   "name": "@farhoodliquor/paperclip-adapter-claude-k8s",
-  "version": "0.1.1",
+  "version": "0.1.8",
   "description": "Paperclip adapter plugin that runs Claude Code agents as Kubernetes Jobs",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/farhoodliquor/paperclip-adapter-claude-k8s"
+  },
+  "bugs": {
+    "url": "https://github.com/farhoodliquor/paperclip-adapter-claude-k8s/issues"
+  },
+  "homepage": "https://github.com/farhoodliquor/paperclip-adapter-claude-k8s#readme",
   "type": "module",
   "paperclip": {
     "adapterUiParser": "1.0.0"
@@ -10,7 +18,8 @@
   "exports": {
     ".": "./dist/index.js",
     "./server": "./dist/server/index.js",
-    "./ui-parser": "./dist/ui-parser.js"
+    "./ui-parser": "./dist/ui-parser.js",
+    "./cli": "./dist/cli/index.js"
   },
   "files": [
     "dist"
@@ -18,10 +27,14 @@
   "scripts": {
     "build": "tsc",
     "clean": "rm -rf dist",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "coverage": "vitest run --coverage"
   },
   "dependencies": {
-    "@kubernetes/client-node": "^1.0.0"
+    "@kubernetes/client-node": "^1.0.0",
+    "picocolors": "^1.1.1"
   },
   "peerDependencies": {
     "@paperclipai/adapter-utils": ">=0.3.0"
@@ -29,6 +42,8 @@
   "devDependencies": {
     "@paperclipai/adapter-utils": "^0.3.0",
     "@types/node": "^24.6.0",
-    "typescript": "^5.7.3"
+    "@vitest/coverage-v8": "^4.1.4",
+    "typescript": "^5.7.3",
+    "vitest": "^4.1.4"
   }
 }
