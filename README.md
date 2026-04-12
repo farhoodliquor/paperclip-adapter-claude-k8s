@@ -1,4 +1,4 @@
-# paperclip-adapter-claude-k8s
+# Claude (Kubernetes) Paperclip Adapter Plugin
 
 Paperclip adapter plugin that runs Claude Code agents as isolated Kubernetes Jobs instead of inside the main Paperclip process.
 
