@@ -92,6 +92,37 @@ describe("sessionCodec", () => {
         repoRef: "main",
       });
     });
+
+    it("maps promptBundleKey", () => {
+      expect(deserialize({ sessionId: "s", promptBundleKey: "bundle-1" })?.promptBundleKey).toBe("bundle-1");
+    });
+
+    it("maps prompt_bundle_key as fallback", () => {
+      expect(deserialize({ sessionId: "s", prompt_bundle_key: "bundle-2" })?.promptBundleKey).toBe("bundle-2");
+    });
+
+    it("prefers promptBundleKey over prompt_bundle_key", () => {
+      const result = deserialize({ sessionId: "s", promptBundleKey: "a", prompt_bundle_key: "b" });
+      expect(result?.promptBundleKey).toBe("a");
+    });
+
+    it("omits promptBundleKey when empty", () => {
+      const result = deserialize({ sessionId: "s", promptBundleKey: "" });
+      expect(result).not.toHaveProperty("promptBundleKey");
+    });
+
+    it("includes promptBundleKey in full round-trip", () => {
+      const result = deserialize({
+        sessionId: "sess_abc",
+        cwd: "/work",
+        promptBundleKey: "bundle-key-123",
+      });
+      expect(result).toEqual({
+        sessionId: "sess_abc",
+        cwd: "/work",
+        promptBundleKey: "bundle-key-123",
+      });
+    });
   });
 
   describe("serialize", () => {
@@ -123,6 +154,16 @@ describe("sessionCodec", () => {
         repoRef: "main",
       };
       expect(serialize(input)).toEqual(input);
+    });
+
+    it("serializes promptBundleKey", () => {
+      const result = serialize({ sessionId: "s", promptBundleKey: "bundle-1" });
+      expect(result?.promptBundleKey).toBe("bundle-1");
+    });
+
+    it("omits promptBundleKey when empty", () => {
+      const result = serialize({ sessionId: "s", promptBundleKey: "" });
+      expect(result).not.toHaveProperty("promptBundleKey");
     });
 
     it("omits undefined fields", () => {
