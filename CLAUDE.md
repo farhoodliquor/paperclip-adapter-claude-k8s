@@ -10,10 +10,6 @@ This is a Paperclip adapter plugin that runs Claude Code agents as isolated Kube
 
 Build and publish are handled by GitHub Actions on tag push — do **not** build locally. To release a new version, bump `package.json` with `npm version` and push the tag — CI handles the rest.
 
-## CI/CD
-
-Build and publish are handled by GitHub Actions on tag push — do **not** build locally. To release a new version, bump `package.json` with `npm version` and push the tag — CI handles the rest.
-
 ## Common Commands
 
 ```bash
