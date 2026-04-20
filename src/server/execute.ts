@@ -356,8 +356,20 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         };
       }
     }
-  } catch {
-    // If we can't check, proceed — the heartbeat service enforces concurrency too
+  } catch (err: unknown) {
+    // If we can't list jobs, fail closed — the K8s concurrency guard is the
+    // only thing preventing zombie Jobs on a shared PVC from corrupting
+    // sessions.  404 (namespace not found) is treated as a hard failure;
+    // other errors (5xx, network) are also surfaced.
+    const msg = err instanceof Error ? err.message : String(err);
+    await onLog("stderr", `[paperclip] Concurrency guard failed: unable to list jobs: ${msg}\n`);
+    return {
+      exitCode: null,
+      signal: null,
+      timedOut: false,
+      errorMessage: `Concurrency guard unreachable: ${msg}`,
+      errorCode: "k8s_concurrency_guard_unreachable",
+    };
   }
 
   // Build Job manifest
@@ -486,11 +498,21 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
             keepaliveJobTerminal = true;
             return;
           }
-        } catch {
-          // Job may have been deleted out from under us, or the API call
-          // transiently failed.  Either way, do not refresh updatedAt —
-          // either the Job really is gone, or the next tick will re-check.
-          keepaliveJobTerminal = true;
+        } catch (err: unknown) {
+          // Only treat 404 (Job deleted) as terminal.  Transient 5xx or
+          // connection resets should NOT permanently disable the keepalive —
+          // the next tick will re-check and the reaper uses the staleness
+          // window as a safety net.
+          const statusCode = (err as { response?: { statusCode?: number } })?.response?.statusCode
+            ?? (err as { statusCode?: number })?.statusCode;
+          if (statusCode === 404) {
+            keepaliveJobTerminal = true;
+            return;
+          }
+          // Log transient errors but leave keepaliveJobTerminal false so
+          // the next tick retries.
+          const msg = err instanceof Error ? err.message : String(err);
+          void onLog("stderr", `[paperclip] keepalive: transient error checking job status: ${msg}\n`).catch(() => {});
           return;
         }
 
@@ -550,11 +572,14 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     } else {
       // waitForJobCompletion threw — re-check job state to avoid returning
       // while the job is still running (which would cause UI staleness and
-      // concurrency errors on retry).
+      // concurrency errors on retry).  Use a bounded timeout (60s) so we
+      // don't hang the heartbeat indefinitely if the K8s API is degraded.
       jobTimedOut = false;
-      const actualState = await waitForJobCompletion(namespace, jobName, 0, kubeconfigPath);
+      const RECHECK_TIMEOUT_MS = 60_000;
+      const actualState = await waitForJobCompletion(namespace, jobName, RECHECK_TIMEOUT_MS, kubeconfigPath);
       if (actualState.timedOut) {
-        // Truly a timeout after re-check — treat as timed out.
+        // Re-check itself timed out — the job may still be running.
+        // Return an error so the UI knows the run is not done.
         jobTimedOut = true;
       } else if (!actualState.succeeded) {
         // Job still not terminal — the completion error was likely transient.

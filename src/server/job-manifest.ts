@@ -148,11 +148,21 @@ function buildEnvVars(
   // HOME must be /paperclip to match PVC mount and enable session resume
   merged.HOME = "/paperclip";
 
-  // Convert to V1EnvVar array
+  // Convert literal env to V1EnvVar array
   const envVars: k8s.V1EnvVar[] = Object.entries(merged).map(([name, value]) => ({
     name,
     value,
   }));
+
+  // Append valueFrom entries from the Deployment container (secretKeyRef,
+  // configMapKeyRef, fieldRef, etc.).  Skip any whose name was already set
+  // by a literal value — the literal value wins (same precedence as above).
+  const literalNames = new Set(Object.keys(merged));
+  for (const entry of selfPod.inheritedEnvValueFrom) {
+    if (!literalNames.has(entry.name)) {
+      envVars.push(entry);
+    }
+  }
 
   return envVars;
 }
@@ -377,6 +387,7 @@ export function buildJobManifest(input: JobBuildInput): JobBuildResult {
               workingDir,
               command: ["sh", "-c", mainCommand],
               env: envVars,
+              ...(selfPod.inheritedEnvFrom.length > 0 ? { envFrom: selfPod.inheritedEnvFrom } : {}),
               volumeMounts,
               securityContext,
               resources: containerResources,

@@ -24,6 +24,8 @@ function makeSelfPod(overrides: Partial<SelfPodInfo> = {}): SelfPodInfo {
     pvcClaimName: "paperclip-data",
     secretVolumes: [],
     inheritedEnv: {},
+    inheritedEnvValueFrom: [],
+    inheritedEnvFrom: [],
     ...overrides,
   };
 }
@@ -330,6 +332,50 @@ describe("buildJobManifest", () => {
       const { job } = buildJobManifest({ ctx, selfPod });
       const apiUrl = job.spec?.template?.spec?.containers[0]?.env?.find((e) => e.name === "PAPERCLIP_API_URL");
       expect(apiUrl?.value).toBe("http://paperclip:8080");
+    });
+
+    it("includes valueFrom env vars from selfPod", () => {
+      selfPod.inheritedEnvValueFrom = [
+        { name: "ANTHROPIC_API_KEY", valueFrom: { secretKeyRef: { name: "api-keys", key: "anthropic" } } },
+      ];
+      const { job } = buildJobManifest({ ctx, selfPod });
+      const envList = job.spec?.template?.spec?.containers[0]?.env ?? [];
+      const apiKeyEntry = envList.find((e) => e.name === "ANTHROPIC_API_KEY");
+      expect(apiKeyEntry?.valueFrom?.secretKeyRef?.name).toBe("api-keys");
+      expect(apiKeyEntry?.valueFrom?.secretKeyRef?.key).toBe("anthropic");
+      expect(apiKeyEntry?.value).toBeUndefined();
+    });
+
+    it("literal env overrides valueFrom with the same name", () => {
+      selfPod.inheritedEnv = { MY_VAR: "literal-value" };
+      selfPod.inheritedEnvValueFrom = [
+        { name: "MY_VAR", valueFrom: { secretKeyRef: { name: "sec", key: "k" } } },
+      ];
+      const { job } = buildJobManifest({ ctx, selfPod });
+      const envList = job.spec?.template?.spec?.containers[0]?.env ?? [];
+      const myVar = envList.filter((e) => e.name === "MY_VAR");
+      expect(myVar).toHaveLength(1);
+      expect(myVar[0]?.value).toBe("literal-value");
+      expect(myVar[0]?.valueFrom).toBeUndefined();
+    });
+
+    it("includes envFrom sources from selfPod on the container", () => {
+      selfPod.inheritedEnvFrom = [
+        { secretRef: { name: "api-secrets" } },
+        { configMapRef: { name: "app-config" } },
+      ];
+      const { job } = buildJobManifest({ ctx, selfPod });
+      const container = job.spec?.template?.spec?.containers[0];
+      expect(container?.envFrom).toHaveLength(2);
+      expect(container?.envFrom?.[0]?.secretRef?.name).toBe("api-secrets");
+      expect(container?.envFrom?.[1]?.configMapRef?.name).toBe("app-config");
+    });
+
+    it("omits envFrom when selfPod has none", () => {
+      selfPod.inheritedEnvFrom = [];
+      const { job } = buildJobManifest({ ctx, selfPod });
+      const container = job.spec?.template?.spec?.containers[0];
+      expect(container?.envFrom).toBeUndefined();
     });
   });
 

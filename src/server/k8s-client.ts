@@ -20,8 +20,12 @@ export interface SelfPodInfo {
   dnsConfig: k8s.V1PodDNSConfig | undefined;
   pvcClaimName: string | null;
   secretVolumes: SelfPodSecretVolume[];
-  /** Env vars inherited from the Deployment container. */
+  /** Env vars inherited from the Deployment container (literal name/value pairs). */
   inheritedEnv: Record<string, string>;
+  /** Env vars with valueFrom (secretKeyRef, configMapKeyRef, etc.) from the Deployment container. */
+  inheritedEnvValueFrom: k8s.V1EnvVar[];
+  /** envFrom sources (secretRef, configMapRef) from the Deployment container. */
+  inheritedEnvFrom: k8s.V1EnvFromSource[];
 }
 
 let cachedSelfPod: SelfPodInfo | null = null;
@@ -134,11 +138,20 @@ export async function getSelfPodInfo(kubeconfigPath?: string): Promise<SelfPodIn
   // Collect env vars from the pod spec's container definition.
   // Agent config env (set in buildEnvVars) will override these.
   const inheritedEnv: Record<string, string> = {};
+  const inheritedEnvValueFrom: k8s.V1EnvVar[] = [];
   for (const envItem of mainContainer.env ?? []) {
     if (!envItem.name) continue;
-    const value = envItem.value ?? "";
-    if (value) inheritedEnv[envItem.name] = value;
+    if (envItem.valueFrom) {
+      // Preserve valueFrom entries (secretKeyRef, configMapKeyRef, fieldRef, etc.)
+      inheritedEnvValueFrom.push({ name: envItem.name, valueFrom: envItem.valueFrom });
+    } else {
+      const value = envItem.value ?? "";
+      if (value) inheritedEnv[envItem.name] = value;
+    }
   }
+
+  // Capture envFrom sources (secretRef, configMapRef) from the container spec
+  const inheritedEnvFrom: k8s.V1EnvFromSource[] = mainContainer.envFrom ?? [];
 
   cachedSelfPod = {
     namespace,
@@ -150,6 +163,8 @@ export async function getSelfPodInfo(kubeconfigPath?: string): Promise<SelfPodIn
     pvcClaimName,
     secretVolumes,
     inheritedEnv,
+    inheritedEnvValueFrom,
+    inheritedEnvFrom,
   };
 
   return cachedSelfPod;
