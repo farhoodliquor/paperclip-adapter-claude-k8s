@@ -42,6 +42,14 @@ describe("getConfigSchema", () => {
     expect(field!.default).toBe(true);
   });
 
+  it("reattachOrphanedJobs defaults to true", () => {
+    const schema = getConfigSchema();
+    const field = schema.fields.find((f: ConfigFieldSchema) => f.key === "reattachOrphanedJobs");
+    expect(field).toBeDefined();
+    expect(field!.type).toBe("toggle");
+    expect(field!.default).toBe(true);
+  });
+
   it("has imagePullPolicy as select with correct options", () => {
     const schema = getConfigSchema();
     const field = schema.fields.find((f: ConfigFieldSchema) => f.key === "imagePullPolicy");

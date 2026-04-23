@@ -203,6 +203,17 @@ function sanitizeForK8sName(value: string, maxLen = 16): string {
 }
 
 /**
+ * Sanitize a string for use as a Kubernetes label value (RFC 1123 subset:
+ * `[a-zA-Z0-9]([-_.a-zA-Z0-9]*[a-zA-Z0-9])?`, max 63 chars).  Returns `null`
+ * when no usable characters remain — the caller should omit the label.
+ */
+export function sanitizeLabelValue(value: string, maxLen = 63): string | null {
+  const cleaned = value.replace(/[^a-zA-Z0-9._-]/g, "").slice(0, maxLen);
+  const trimmed = cleaned.replace(/^[^a-zA-Z0-9]+/, "").replace(/[^a-zA-Z0-9]+$/, "");
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+/**
  * Build a short deterministic hash suffix from the raw inputs to avoid
  * collisions when sanitized slugs happen to be identical.
  */
@@ -428,6 +439,15 @@ export function buildJobManifest(input: JobBuildInput): JobBuildResult {
     "paperclip.io/company-id": agent.companyId,
     "paperclip.io/adapter-type": "claude_k8s",
   };
+  // Reattach-target labels: let a future execute() identify this Job as the
+  // continuation of the same logical unit of work (same task + same resume
+  // session) so it can attach to the running pod across a Paperclip restart
+  // instead of deleting it and starting over (FAR-124).
+  const taskIdRaw = asString(context.taskId, "") || asString(context.issueId, "");
+  const taskLabel = taskIdRaw ? sanitizeLabelValue(taskIdRaw) : null;
+  if (taskLabel) labels["paperclip.io/task-id"] = taskLabel;
+  const sessionLabel = runtimeSessionId ? sanitizeLabelValue(runtimeSessionId) : null;
+  if (sessionLabel) labels["paperclip.io/session-id"] = sessionLabel;
   for (const [key, value] of Object.entries(extraLabels)) {
     labels[key] = value;
   }

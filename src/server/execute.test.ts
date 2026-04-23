@@ -1,5 +1,29 @@
 import { describe, it, expect } from "vitest";
-import { isK8s404, buildPartialRunError } from "./execute.js";
+import type * as k8s from "@kubernetes/client-node";
+import { isK8s404, buildPartialRunError, isReattachableOrphan } from "./execute.js";
+
+function makeJob(opts: {
+  runId?: string;
+  agentId?: string;
+  taskId?: string;
+  sessionId?: string;
+  adapterType?: string;
+  terminal?: boolean;
+}): k8s.V1Job {
+  const labels: Record<string, string> = {
+    "paperclip.io/adapter-type": opts.adapterType ?? "claude_k8s",
+  };
+  if (opts.agentId) labels["paperclip.io/agent-id"] = opts.agentId;
+  if (opts.runId) labels["paperclip.io/run-id"] = opts.runId;
+  if (opts.taskId) labels["paperclip.io/task-id"] = opts.taskId;
+  if (opts.sessionId) labels["paperclip.io/session-id"] = opts.sessionId;
+  return {
+    metadata: { name: "ac-job", namespace: "paperclip", labels },
+    status: opts.terminal
+      ? { conditions: [{ type: "Complete", status: "True" }] }
+      : { conditions: [] },
+  } as k8s.V1Job;
+}
 
 describe("isK8s404", () => {
   it("returns false for non-Error values", () => {
@@ -104,5 +128,61 @@ describe("buildPartialRunError", () => {
     const stdout = [initLine, anotherSystem, "real error line"].join("\n");
     const msg = buildPartialRunError(1, "model-x", stdout);
     expect(msg).toBe("Claude exited with code 1: real error line");
+  });
+});
+
+describe("isReattachableOrphan", () => {
+  const agentId = "agent-abc";
+  const taskId = "task-xyz";
+  const sessionId = "sess-123";
+
+  it("returns true when agent/task/session all match and Job is not terminal", () => {
+    const job = makeJob({ agentId, taskId, sessionId, runId: "old-run" });
+    expect(isReattachableOrphan(job, { agentId, taskId, sessionId })).toBe(true);
+  });
+
+  it("returns false when the Job is already Complete", () => {
+    const job = makeJob({ agentId, taskId, sessionId, runId: "old-run", terminal: true });
+    expect(isReattachableOrphan(job, { agentId, taskId, sessionId })).toBe(false);
+  });
+
+  it("returns false when expected taskId is null (caller couldn't derive one)", () => {
+    const job = makeJob({ agentId, taskId, sessionId });
+    expect(isReattachableOrphan(job, { agentId, taskId: null, sessionId })).toBe(false);
+  });
+
+  it("returns false when expected sessionId is null", () => {
+    const job = makeJob({ agentId, taskId, sessionId });
+    expect(isReattachableOrphan(job, { agentId, taskId, sessionId: null })).toBe(false);
+  });
+
+  it("returns false when agent id doesn't match", () => {
+    const job = makeJob({ agentId: "agent-other", taskId, sessionId });
+    expect(isReattachableOrphan(job, { agentId, taskId, sessionId })).toBe(false);
+  });
+
+  it("returns false when task id doesn't match", () => {
+    const job = makeJob({ agentId, taskId: "task-other", sessionId });
+    expect(isReattachableOrphan(job, { agentId, taskId, sessionId })).toBe(false);
+  });
+
+  it("returns false when session id doesn't match", () => {
+    const job = makeJob({ agentId, taskId, sessionId: "sess-other" });
+    expect(isReattachableOrphan(job, { agentId, taskId, sessionId })).toBe(false);
+  });
+
+  it("returns false when the Job is from a different adapter type", () => {
+    const job = makeJob({ agentId, taskId, sessionId, adapterType: "claude_local" });
+    expect(isReattachableOrphan(job, { agentId, taskId, sessionId })).toBe(false);
+  });
+
+  it("returns false when Job has no task-id label (labels were introduced in FAR-124)", () => {
+    const job = makeJob({ agentId, sessionId });
+    expect(isReattachableOrphan(job, { agentId, taskId, sessionId })).toBe(false);
+  });
+
+  it("returns false when Job has no session-id label", () => {
+    const job = makeJob({ agentId, taskId });
+    expect(isReattachableOrphan(job, { agentId, taskId, sessionId })).toBe(false);
   });
 });

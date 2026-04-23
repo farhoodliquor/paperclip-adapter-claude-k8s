@@ -89,6 +89,13 @@ export function getConfigSchema(): AdapterConfigSchema {
       label: "Retain Jobs",
       hint: "Skip cleanup of completed Jobs for debugging purposes.",
     },
+    {
+      type: "toggle",
+      key: "reattachOrphanedJobs",
+      label: "Reattach to Orphaned Jobs",
+      hint: "If a prior K8s Job for the same agent/task/session is still running (e.g. Paperclip restarted mid-run), attach to it and stream its output instead of deleting it and starting a new pod. Default: on.",
+      default: true,
+    },
     // Resource Limits
     {
       type: "text",

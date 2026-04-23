@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import type { AdapterExecutionContext } from "@paperclipai/adapter-utils";
-import { buildJobManifest, buildRtkSetupCommands } from "./job-manifest.js";
+import { buildJobManifest, buildRtkSetupCommands, sanitizeLabelValue } from "./job-manifest.js";
 import type { SelfPodInfo } from "./k8s-client.js";
 
 function makeCtx(overrides: Partial<AdapterExecutionContext> = {}): AdapterExecutionContext {
@@ -135,6 +135,36 @@ describe("buildJobManifest", () => {
       const { job } = buildJobManifest({ ctx, selfPod });
       expect(job.metadata?.labels?.env).toBe("prod");
       expect(job.metadata?.labels?.["paperclip.io/adapter-type"]).toBe("claude_k8s");
+    });
+
+    it("adds task-id label when context provides taskId", () => {
+      ctx.context = { taskId: "task-xyz-789" };
+      const { job } = buildJobManifest({ ctx, selfPod });
+      expect(job.metadata?.labels?.["paperclip.io/task-id"]).toBe("task-xyz-789");
+    });
+
+    it("falls back to issueId when taskId absent", () => {
+      ctx.context = { issueId: "issue-42" };
+      const { job } = buildJobManifest({ ctx, selfPod });
+      expect(job.metadata?.labels?.["paperclip.io/task-id"]).toBe("issue-42");
+    });
+
+    it("adds session-id label when runtime provides sessionId", () => {
+      ctx.runtime = { ...ctx.runtime, sessionId: "sess-abc-1234" };
+      const { job } = buildJobManifest({ ctx, selfPod });
+      expect(job.metadata?.labels?.["paperclip.io/session-id"]).toBe("sess-abc-1234");
+    });
+
+    it("reads sessionId from runtime.sessionParams when sessionId prop missing", () => {
+      ctx.runtime = { ...ctx.runtime, sessionParams: { sessionId: "sess-from-params" } };
+      const { job } = buildJobManifest({ ctx, selfPod });
+      expect(job.metadata?.labels?.["paperclip.io/session-id"]).toBe("sess-from-params");
+    });
+
+    it("omits task-id and session-id labels when neither is provided", () => {
+      const { job } = buildJobManifest({ ctx, selfPod });
+      expect(job.metadata?.labels?.["paperclip.io/task-id"]).toBeUndefined();
+      expect(job.metadata?.labels?.["paperclip.io/session-id"]).toBeUndefined();
     });
   });
 
@@ -727,5 +757,34 @@ describe("buildJobManifest", () => {
       expect(filterScript).toContain("Array.isArray");
       expect(filterScript).toContain("b.text");
     });
+  });
+});
+
+describe("sanitizeLabelValue", () => {
+  it("passes through already-valid UUIDs and slugs", () => {
+    expect(sanitizeLabelValue("abc-123-def")).toBe("abc-123-def");
+    expect(sanitizeLabelValue("0d8b4472-c42c-4052-aab1-e32897909afa")).toBe("0d8b4472-c42c-4052-aab1-e32897909afa");
+  });
+
+  it("strips characters outside [a-zA-Z0-9._-]", () => {
+    expect(sanitizeLabelValue("task:xyz/123")).toBe("taskxyz123");
+    expect(sanitizeLabelValue("abc 123")).toBe("abc123");
+  });
+
+  it("trims leading/trailing non-alphanumeric characters", () => {
+    expect(sanitizeLabelValue("--abc--")).toBe("abc");
+    expect(sanitizeLabelValue("...123...")).toBe("123");
+  });
+
+  it("truncates to the configured maxLen", () => {
+    const long = "a".repeat(200);
+    const out = sanitizeLabelValue(long, 63);
+    expect(out?.length).toBe(63);
+  });
+
+  it("returns null when no alphanumeric characters remain", () => {
+    expect(sanitizeLabelValue("---")).toBeNull();
+    expect(sanitizeLabelValue("")).toBeNull();
+    expect(sanitizeLabelValue("   ")).toBeNull();
   });
 });
