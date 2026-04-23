@@ -21,6 +21,13 @@ export interface ClaudePromptBundle {
 
 const DEFAULT_PAPERCLIP_INSTANCE_ID = "default";
 
+function validatePathComponent(value: string, fieldName: string): void {
+  if (value.trim().length === 0) throw new Error(`Invalid ${fieldName}: must not be empty`);
+  if (value.includes("/") || value.includes("\\")) throw new Error(`Invalid ${fieldName}: must not contain path separators`);
+  if (value.includes("..")) throw new Error(`Invalid ${fieldName}: must not contain ".."`);
+  if (value.includes("\0")) throw new Error(`Invalid ${fieldName}: must not contain null bytes`);
+}
+
 function resolveManagedClaudePromptCacheRoot(companyId: string): string {
   const paperclipHome =
     (typeof process.env.PAPERCLIP_HOME === "string" && process.env.PAPERCLIP_HOME.trim().length > 0
@@ -31,6 +38,8 @@ function resolveManagedClaudePromptCacheRoot(companyId: string): string {
     (typeof process.env.PAPERCLIP_INSTANCE_ID === "string" && process.env.PAPERCLIP_INSTANCE_ID.trim().length > 0
       ? process.env.PAPERCLIP_INSTANCE_ID.trim()
       : null) ?? DEFAULT_PAPERCLIP_INSTANCE_ID;
+  validatePathComponent(companyId, "companyId");
+  validatePathComponent(instanceId, "instanceId");
   return path.resolve(paperclipHome, "instances", instanceId, "companies", companyId, "claude-prompt-cache");
 }
 
