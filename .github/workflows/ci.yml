@@ -29,23 +29,20 @@ jobs:
     needs: test
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/master' && github.event_name == 'push'
+    permissions:
+      id-token: write
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
+          registry-url: "https://registry.npmjs.org"
           cache: "npm"
 
       - run: npm ci
 
       - run: npm run build
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          registry-url: "https://registry.npmjs.org"
-          cache: "npm"
 
       - name: Publish (skip if version already exists)
         run: |
@@ -54,7 +51,5 @@ jobs:
           if npm view "${PKG_NAME}@${PKG_VERSION}" version 2>/dev/null; then
             echo "Version ${PKG_VERSION} already published — skipping."
           else
-            npm publish --access public
+            npm publish --provenance --access public
           fi
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
