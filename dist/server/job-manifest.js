@@ -1,5 +1,81 @@
 import { asString, asNumber, asBoolean, asStringArray, parseObject, buildPaperclipEnv, renderTemplate, } from "@paperclipai/adapter-utils/server-utils";
 import { createHash } from "node:crypto";
+/**
+ * Build the shell command prefix that installs a native Node.js PostToolUse
+ * hook into Claude Code's settings.  The hook truncates oversized tool outputs
+ * before they reach the model — replacing the RTK binary init-container
+ * approach with a self-contained Node.js implementation.
+ *
+ * Both scripts are base64-encoded so they can be embedded in a sh -c command
+ * string without any quoting or escaping issues.
+ *
+ * @param maxOutputBytes  Byte threshold above which tool output is truncated.
+ * @returns               A shell command string (suitable for "&&"-chaining
+ *                        before the claude invocation).
+ */
+export function buildRtkSetupCommands(maxOutputBytes) {
+    // --- Filter script ----------------------------------------------------------
+    // This script runs as the PostToolUse hook inside every K8s Job pod.
+    // Claude Code writes the hook event as JSON to the script's stdin; the script
+    // truncates the tool_response/tool_result content when it exceeds the
+    // threshold and writes the (possibly modified) JSON to stdout.
+    //
+    // Field-name coverage:
+    //   • tool_response — documented hook event format for PostToolUse
+    //   • tool_result   — alternative name seen in some Claude Code versions
+    // Content may be a plain string or an array of typed blocks (text/image/…).
+    const filterScript = [
+        `const c=[];`,
+        `process.stdin.on('data',d=>c.push(d));`,
+        `process.stdin.on('end',()=>{`,
+        `const raw=Buffer.concat(c).toString('utf-8');`,
+        `let o;try{o=JSON.parse(raw);}catch{process.stdout.write(raw);return;}`,
+        `const MAX=${maxOutputBytes};`,
+        `function trunc(s){`,
+        `if(typeof s!=='string')return s;`,
+        `const b=Buffer.from(s,'utf-8');`,
+        `if(b.length<=MAX)return s;`,
+        `return b.slice(0,MAX).toString('utf-8')+'\\n[...'+(b.length-MAX)+' bytes truncated by paperclip-rtk]';`,
+        `}`,
+        `const tr=o&&(o.tool_response||o.tool_result);`,
+        `if(tr){`,
+        `if(typeof tr.content==='string'){tr.content=trunc(tr.content);}`,
+        `else if(Array.isArray(tr.content)){`,
+        `tr.content=tr.content.map(function(b){`,
+        `if(b&&typeof b==='object'&&typeof b.text==='string'){`,
+        `return Object.assign({},b,{text:trunc(b.text)});`,
+        `}return b;`,
+        `});`,
+        `}`,
+        `}`,
+        `process.stdout.write(JSON.stringify(o));`,
+        `});`,
+    ].join("");
+    // --- Settings script --------------------------------------------------------
+    // Reads the existing ~/.claude/settings.json (if any), merges in the RTK
+    // PostToolUse hook, and writes the file back.  All other settings sections
+    // are preserved; only PostToolUse is replaced so we own the full hook list
+    // for this run.
+    const settingsScript = [
+        `const fs=require('fs'),pt=require('path');`,
+        `const p=pt.join(process.env.HOME,'.claude','settings.json');`,
+        `let s={};try{s=JSON.parse(fs.readFileSync(p,'utf-8'));}catch(e){}`,
+        `s.hooks=s.hooks||{};`,
+        `s.hooks.PostToolUse=[{matcher:'.*',hooks:[{type:'command',command:'node /tmp/.rtk-filter.js'}]}];`,
+        `fs.mkdirSync(pt.dirname(p),{recursive:true});`,
+        `fs.writeFileSync(p,JSON.stringify(s));`,
+    ].join("");
+    // Encode as base64 so the strings can be embedded directly in a shell command
+    // without any quoting concerns (base64 alphabet: A-Za-z0-9+/=).
+    const filterB64 = Buffer.from(filterScript, "utf-8").toString("base64");
+    const settingsB64 = Buffer.from(settingsScript, "utf-8").toString("base64");
+    return [
+        // Write the filter script
+        `node -e "require('fs').writeFileSync('/tmp/.rtk-filter.js',Buffer.from('${filterB64}','base64').toString('utf-8'))"`,
+        // Install the Claude Code PostToolUse hook (merge into existing settings)
+        `node -e "eval(Buffer.from('${settingsB64}','base64').toString('utf-8'))"`,
+    ].join(" && ");
+}
 /** Prompts above this size (bytes) are staged via a Secret instead of an
  *  init container env var, protecting against the ~1 MiB PodSpec limit. */
 const LARGE_PROMPT_THRESHOLD_BYTES = 256 * 1024;
@@ -90,6 +166,16 @@ function parseKeyValueConfig(raw) {
 }
 function sanitizeForK8sName(value, maxLen = 16) {
     return value.toLowerCase().replace(/[^a-z0-9-]/g, "").slice(0, maxLen);
+}
+/**
+ * Sanitize a string for use as a Kubernetes label value (RFC 1123 subset:
+ * `[a-zA-Z0-9]([-_.a-zA-Z0-9]*[a-zA-Z0-9])?`, max 63 chars).  Returns `null`
+ * when no usable characters remain — the caller should omit the label.
+ */
+export function sanitizeLabelValue(value, maxLen = 63) {
+    const cleaned = value.replace(/[^a-zA-Z0-9._-]/g, "").slice(0, maxLen);
+    const trimmed = cleaned.replace(/^[^a-zA-Z0-9]+/, "").replace(/[^a-zA-Z0-9]+$/, "");
+    return trimmed.length > 0 ? trimmed : null;
 }
 /**
  * Build a short deterministic hash suffix from the raw inputs to avoid
@@ -202,6 +288,8 @@ export function buildJobManifest(input) {
     const nodeSelector = parseKeyValueConfig(config.nodeSelector);
     const tolerations = Array.isArray(config.tolerations) ? config.tolerations : [];
     const extraLabels = parseKeyValueConfig(config.labels);
+    const enableRtk = asBoolean(config.enableRtk, false);
+    const rtkMaxOutputBytes = asNumber(config.rtkMaxOutputBytes, 50000);
     // Resolve working directory — use workspace cwd, fall back to /paperclip
     const workspaceContext = parseObject(context.paperclipWorkspace);
     const workspaceCwd = asString(workspaceContext.cwd, "");
@@ -289,6 +377,17 @@ export function buildJobManifest(input) {
         "paperclip.io/company-id": agent.companyId,
         "paperclip.io/adapter-type": "claude_k8s",
     };
+    // Reattach-target labels: let a future execute() identify this Job as the
+    // continuation of the same logical unit of work (same task + same resume
+    // session) so it can attach to the running pod across a Paperclip restart
+    // instead of deleting it and starting over (FAR-124).
+    const taskIdRaw = asString(context.taskId, "") || asString(context.issueId, "");
+    const taskLabel = taskIdRaw ? sanitizeLabelValue(taskIdRaw) : null;
+    if (taskLabel)
+        labels["paperclip.io/task-id"] = taskLabel;
+    const sessionLabel = runtimeSessionId ? sanitizeLabelValue(runtimeSessionId) : null;
+    if (sessionLabel)
+        labels["paperclip.io/session-id"] = sessionLabel;
     for (const [key, value] of Object.entries(extraLabels)) {
         labels[key] = value;
     }
@@ -345,7 +444,13 @@ export function buildJobManifest(input) {
     };
     // Build the claude command string for the main container
     const claudeArgsEscaped = claudeArgs.map((a) => `'${a.replace(/'/g, "'\\''")}'`).join(" ");
-    const mainCommand = `cat /tmp/prompt/prompt.txt | claude ${claudeArgsEscaped}`;
+    const claudeInvocation = `cat /tmp/prompt/prompt.txt | claude ${claudeArgsEscaped}`;
+    // When RTK output filtering is enabled, prepend the Node.js hook setup.
+    // This writes a filter script and a Claude Code settings file that installs
+    // it as a PostToolUse hook — no external binary or init container required.
+    const mainCommand = enableRtk
+        ? `${buildRtkSetupCommands(rtkMaxOutputBytes)} && ${claudeInvocation}`
+        : claudeInvocation;
     // Decide prompt delivery strategy: env var (small) or Secret volume (large).
     const promptBytes = Buffer.byteLength(prompt, "utf-8");
     const useLargePromptPath = promptBytes > LARGE_PROMPT_THRESHOLD_BYTES;
