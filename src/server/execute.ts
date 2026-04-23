@@ -733,6 +733,26 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     }
 
     await onLog("stdout", `[paperclip] Reattaching to in-flight K8s Job ${jobName} in namespace ${namespace} (prior run ${reattachTarget.priorRunId || "unknown"})\n`);
+
+    // Relabel the reattached Job with the current run-id (and session-id if
+    // available) so the next concurrency guard sees it as owned by this run
+    // rather than an orphan from the prior run.
+    const labelPatch: Array<{ op: "add" | "replace"; path: string; value: string }> = [
+      { op: "replace", path: "/metadata/labels/paperclip.io~1run-id", value: runId },
+    ];
+    if (currentSessionLabel) {
+      labelPatch.push({ op: "replace", path: "/metadata/labels/paperclip.io~1session-id", value: currentSessionLabel });
+    }
+    try {
+      await batchApi.patchNamespacedJob({
+        name: jobName,
+        namespace,
+        body: labelPatch,
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      await onLog("stderr", `[paperclip] Warning: failed to relabel reattached Job ${jobName}: ${msg}\n`);
+    }
   } else {
     // Build Job manifest
     const built = buildJobManifest({ ctx, selfPod, promptBundle });
