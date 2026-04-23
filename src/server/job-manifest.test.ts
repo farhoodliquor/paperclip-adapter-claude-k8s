@@ -802,6 +802,28 @@ describe("buildJobManifest", () => {
       expect(filterScript).toContain("tool_result");
     });
 
+    it("filter script truncates without corrupting multi-byte UTF-8", () => {
+      // "中" is U+4E2D, 3 bytes in UTF-8: E4 B8 AD
+      // With MAX=5, two "中" (6 bytes) should truncate to one (3 bytes), not
+      // produce a replacement character from slicing mid-codepoint.
+      const setup = buildRtkSetupCommands(5);
+      const b64Matches = [...setup.matchAll(/Buffer\.from\('([A-Za-z0-9+/=]+)','base64'\)/g)];
+      const filterScript = Buffer.from(b64Matches[0]![1], "base64").toString("utf-8");
+
+      // Extract the trunc function from the filter script and evaluate it
+      const fnMatch = filterScript.match(/(function trunc\(s\)\{.*\})(?=const tr=)/);
+      expect(fnMatch).toBeTruthy();
+      // eslint-disable-next-line no-eval
+      const trunc = eval(`(()=>{const MAX=5;${fnMatch![1]};return trunc;})()`);
+
+      const result = trunc("中中");
+      expect(result).not.toContain("�");
+      expect(result).toContain("中");
+      expect(result).toContain("truncated by paperclip-rtk");
+      // Should report bytes from the actual truncation point, not MAX
+      expect(result).toContain("3 bytes truncated");
+    });
+
     it("filter script handles array content (block format)", () => {
       const setup = buildRtkSetupCommands(50000);
       const b64Matches = [...setup.matchAll(/Buffer\.from\('([A-Za-z0-9+/=]+)','base64'\)/g)];
