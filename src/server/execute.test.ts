@@ -1,6 +1,21 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import type * as k8s from "@kubernetes/client-node";
-import { isK8s404, buildPartialRunError, isReattachableOrphan, describePodTerminatedError } from "./execute.js";
+import type { Writable } from "node:stream";
+
+// Mock the K8s client before importing execute so streamPodLogsOnce picks up
+// the mocked getLogApi.  The mock's logApi.log never resolves, simulating the
+// FAR-10 hang: K8s API drops the connection but the client awaits forever.
+const mockLogFn = vi.fn();
+vi.mock("./k8s-client.js", () => ({
+  getLogApi: () => ({ log: mockLogFn }),
+  getBatchApi: () => ({}),
+  getCoreApi: () => ({}),
+  getAuthzApi: () => ({}),
+  getSelfPodInfo: vi.fn(),
+  resetCache: vi.fn(),
+}));
+
+const { isK8s404, buildPartialRunError, isReattachableOrphan, describePodTerminatedError, streamPodLogsOnce } = await import("./execute.js");
 
 function makeJob(opts: {
   runId?: string;
@@ -243,5 +258,75 @@ describe("describePodTerminatedError", () => {
     const msg = describePodTerminatedError("mypod", "Failed", cs);
     expect(msg).toContain("unknown");
     expect(msg).toContain("Error");
+  });
+});
+
+// Regression: FAR-10 hardening — streamPodLogsOnce must not hang forever when
+// the K8s client's logApi.log call never resolves.  When stopSignal fires, the
+// bail timer must force-return within LOG_STREAM_BAIL_TIMEOUT_MS (3s in the
+// implementation) so execute() does not get stuck waiting for a dead stream.
+describe("streamPodLogsOnce bail timer", () => {
+  beforeEach(() => {
+    mockLogFn.mockReset();
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("returns within the bail window when stopSignal fires during a hung log call", async () => {
+    // logApi.log never resolves — simulates the FAR-10 hang where the K8s
+    // response stream stalls without closing the connection.
+    mockLogFn.mockImplementation((_ns, _pod, _ctr, _writable: Writable) => {
+      return new Promise(() => { /* never resolves */ });
+    });
+
+    const stopSignal = { stopped: false };
+    const onLog = vi.fn().mockResolvedValue(undefined);
+
+    const resultPromise = streamPodLogsOnce(
+      "default",
+      "mypod",
+      onLog,
+      undefined,
+      undefined,
+      undefined,
+      stopSignal,
+    );
+
+    // Fire stopSignal; let the 200ms poller tick and start the bail timer.
+    stopSignal.stopped = true;
+    await vi.advanceTimersByTimeAsync(300);
+
+    // Advance past the 3s bail timeout.  streamPodLogsOnce must now resolve
+    // with an empty string (no chunks were captured) rather than hanging.
+    await vi.advanceTimersByTimeAsync(3_100);
+
+    const result = await resultPromise;
+    expect(result).toBe("");
+    expect(mockLogFn).toHaveBeenCalledOnce();
+  });
+
+  it("returns promptly if logApi.log resolves before stopSignal fires (happy path, no bail involved)", async () => {
+    mockLogFn.mockImplementation(async (_ns, _pod, _ctr, _writable: Writable) => {
+      // Resolve immediately — normal log-stream completion.
+      return undefined;
+    });
+
+    const onLog = vi.fn().mockResolvedValue(undefined);
+
+    // No stopSignal → no bail machinery engaged.
+    const result = await streamPodLogsOnce(
+      "default",
+      "mypod",
+      onLog,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+    );
+
+    expect(result).toBe("");
+    expect(mockLogFn).toHaveBeenCalledOnce();
   });
 });

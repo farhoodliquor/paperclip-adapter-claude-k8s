@@ -248,7 +248,7 @@ async function waitForPod(
  * Stream pod logs once via follow. Returns accumulated stdout when the
  * stream ends (container exit, API disconnect, or abort signal).
  */
-async function streamPodLogsOnce(
+export async function streamPodLogsOnce(
   namespace: string,
   podName: string,
   onLog: AdapterExecutionContext["onLog"],
