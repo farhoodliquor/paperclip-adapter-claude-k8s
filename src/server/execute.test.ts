@@ -914,6 +914,50 @@ describe("execute: happy path", () => {
     expect(result.sessionId).toBe("sess_test123");
   });
 
+  it("returns k8s_job_deleted_externally when job 404s mid-run and stdout has no result event (FAR-31)", async () => {
+    // Reproduces the observed scenario: kubectl delete job while Claude is mid-run.
+    // The log stream captures only partial output (no result event), and the pod
+    // is also gone so getPodExitCode returns null.  The adapter must emit a
+    // descriptive error instead of the misleading "Claude exited with code -1".
+
+    // Log stream writes only the init line — no result event (mid-run deletion)
+    const partialOutput = JSON.stringify({
+      type: "system",
+      subtype: "init",
+      model: "claude-sonnet-4-6",
+      session_id: "sess_x",
+    }) + "\n";
+    mockLogFn.mockImplementation(
+      async (_ns: string, _pod: string, _ctr: string, writable: Writable) => {
+        writable.write(partialOutput);
+      },
+    );
+
+    // Job is gone (404) — matches the kubectl-delete-job-mid-run scenario
+    mockBatchReadJob.mockRejectedValue(
+      Object.assign(new Error("Not Found"), { response: { statusCode: 404 } }),
+    );
+
+    // Pod is also gone — getPodExitCode returns null (no pod found)
+    mockCoreListPods.mockReset();
+    mockCoreListPods
+      .mockResolvedValueOnce({
+        items: [{
+          metadata: { name: "pod-abc" },
+          status: { phase: "Running", containerStatuses: [], initContainerStatuses: [] },
+        }],
+      })
+      .mockResolvedValue({ items: [] }); // pod gone → exitCode null
+
+    const executePromise = execute(makeCtx());
+    await vi.advanceTimersByTimeAsync(3_100);
+    const result = await executePromise;
+
+    expect(result.errorCode).toBe("k8s_job_deleted_externally");
+    expect(result.errorMessage).toBe("K8s Job was deleted externally before Claude could complete");
+    expect(result.exitCode).toBeNull();
+  });
+
   it("reconnects log stream and logs status when job completion takes > 3s", async () => {
     // Make waitForJobCompletion take 4s so the 3s stream reconnect fires first.
     // timeoutSec=4, graceSec=0 → completionTimeoutMs=4000.

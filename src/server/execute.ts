@@ -975,6 +975,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   // Set when we return a mismatch error so the finally block knows not to
   // delete a job that is still alive and the UI is waiting on.
   let skipCleanup = false;
+  // Set when the job disappeared (404) or grace-timer fired before we saw a
+  // terminal condition — used to emit a clearer error when stdout parsing fails.
+  let jobDeletedExternally = false;
 
   const activeJobRef: ActiveJobRef = {
     namespace,
@@ -1231,6 +1234,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         // condition.  The container must have exited first (TTL only fires after
         // completion), so log streaming has captured the full output — continue
         // to stdout parsing rather than returning an error.
+        jobDeletedExternally = true;
         await onLog("stdout", `[paperclip] Job ${jobName} was deleted before terminal condition was observed (TTL or external deletion) — proceeding with captured output.\n`);
       }
     } else {
@@ -1247,6 +1251,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       } else if (actualState.jobGone) {
         // Job was deleted before we could confirm terminal state — same as the
         // fulfilled+jobGone case above: proceed with captured output.
+        jobDeletedExternally = true;
         await onLog("stdout", `[paperclip] Job ${jobName} was deleted before terminal condition was observed (TTL or external deletion) — proceeding with captured output.\n`);
       } else if (!actualState.succeeded) {
         // Job still not terminal — the completion error was likely transient.
@@ -1314,6 +1319,26 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   }
 
   if (!parsed) {
+    if (jobDeletedExternally && exitCode === null) {
+      return {
+        exitCode,
+        signal: null,
+        timedOut: false,
+        errorMessage: "K8s Job was deleted externally before Claude could complete",
+        errorCode: "k8s_job_deleted_externally",
+        resultJson: { stdout },
+      };
+    }
+    if (parsedStream.llmApiEmptyResponse) {
+      return {
+        exitCode,
+        signal: null,
+        timedOut: false,
+        errorMessage: "LLM API returned an empty response (stop_reason: null, output_tokens: 0) — the upstream model API may be degraded or misconfigured",
+        errorCode: "llm_api_error",
+        resultJson: { stdout },
+      };
+    }
     return {
       exitCode,
       signal: null,
