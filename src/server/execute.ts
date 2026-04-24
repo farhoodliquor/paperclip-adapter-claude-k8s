@@ -649,7 +649,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       labelSelector: `paperclip.io/agent-id=${sanitizedAgentId},paperclip.io/adapter-type=claude_k8s`,
     });
     const running = existing.items.filter(
-      (j) => !j.status?.conditions?.some((c) => (c.type === "Complete" || c.type === "Failed") && c.status === "True"),
+      (j) =>
+        !j.metadata?.deletionTimestamp &&
+        !j.status?.conditions?.some((c) => (c.type === "Complete" || c.type === "Failed") && c.status === "True"),
     );
     if (running.length > 0) {
       // Separate orphaned jobs (from a previous server-side run) from truly
