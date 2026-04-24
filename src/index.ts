@@ -15,7 +15,6 @@ Core fields:
 - model (string, optional): Claude model id
 - effort (string, optional): reasoning effort passed via --effort (low|medium|high)
 - maxTurnsPerRun (number, optional): max turns for one run
-- dangerouslySkipPermissions (boolean, optional): pass --dangerously-skip-permissions to claude
 - instructionsFilePath (string, optional): absolute path to a markdown instructions file injected at runtime via --append-system-prompt-file
 - extraArgs (string[], optional): additional CLI args appended to the claude command
 - env (object, optional): KEY=VALUE environment variables; overrides inherited vars from the Deployment

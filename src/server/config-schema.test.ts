@@ -34,12 +34,10 @@ describe("getConfigSchema", () => {
     expect(field!.default).toBe(1000);
   });
 
-  it("dangerouslySkipPermissions defaults to true", () => {
+  it("does not expose dangerouslySkipPermissions in UI schema", () => {
     const schema = getConfigSchema();
     const field = schema.fields.find((f: ConfigFieldSchema) => f.key === "dangerouslySkipPermissions");
-    expect(field).toBeDefined();
-    expect(field!.type).toBe("toggle");
-    expect(field!.default).toBe(true);
+    expect(field).toBeUndefined();
   });
 
   it("reattachOrphanedJobs defaults to true", () => {

@@ -34,13 +34,6 @@ export function getConfigSchema(): AdapterConfigSchema {
       hint: "Maximum number of agentic turns (tool calls) per heartbeat run. 0 means unlimited.",
       default: 1000,
     },
-    {
-      type: "toggle",
-      key: "dangerouslySkipPermissions",
-      label: "Skip Permissions",
-      hint: "Pass --dangerously-skip-permissions to Claude. Enabled by default for unattended K8s Jobs.",
-      default: true,
-    },
     // Kubernetes
     {
       type: "text",
