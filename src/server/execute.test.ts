@@ -170,12 +170,35 @@ describe("buildPartialRunError", () => {
     expect(msg).toBe("Claude exited with code 1: Error: no API key configured");
   });
 
-  it("uses first non-system JSON event as content", () => {
+  it("skips result events (structured protocol artefact — not surfaced verbatim)", () => {
+    // In production, buildPartialRunError is only called when parseClaudeStreamJson
+    // returns null (no result event).  If somehow a result event appears here, the
+    // raw JSON blob must not be shown — the "did not produce a result" message is
+    // cleaner and avoids leaking protocol internals to the UI.
     const resultLike = JSON.stringify({ type: "result", subtype: "error", result: "rate limit" });
     const stdout = [initLine, resultLike].join("\n");
     const msg = buildPartialRunError(2, "claude-sonnet-4-6", stdout);
-    expect(msg).toContain("rate limit");
-    expect(msg).toContain("code 2");
+    expect(msg).toContain("did not produce a result");
+    expect(msg).toContain("claude-sonnet-4-6");
+    expect(msg).not.toMatch(/\{.*type.*result/);
+  });
+
+  it("skips rate_limit_event and surfaces model hint (FAR-32 Anthropic/Nancy repro)", () => {
+    // Reproduces the second variant from FAR-32: init event + rate_limit_event +
+    // assistant event (thinking only, no result).  The rate_limit_event JSON blob
+    // must not appear verbatim in the error message.
+    const rateLimitEvent = JSON.stringify({
+      type: "rate_limit_event",
+      rate_limit_info: { status: "allowed", resetsAt: 1777056000, rateLimitType: "five_hour" },
+      uuid: "3ab8f9eb-b9d6-4bf6-9c39-4608427717fc",
+      session_id: "ad5f3e11-3c0c-4144-b53d-d4b959e57cee",
+    });
+    const stdout = [initLine, rateLimitEvent].join("\n");
+    const msg = buildPartialRunError(null, "claude-opus-4-7", stdout);
+    expect(msg).toContain("claude-opus-4-7");
+    expect(msg).toContain("did not produce a result");
+    expect(msg).not.toContain("rate_limit_event");
+    expect(msg).not.toContain("rateLimitType");
   });
 
   it("skips assistant events and surfaces model hint (FAR-32: MiniMax-M2.7 output_tokens=0)", () => {

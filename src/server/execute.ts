@@ -117,11 +117,12 @@ export function buildPartialRunError(
 ): string {
   if (exitCode === 0) return "Failed to parse Claude JSON output";
 
-  // Walk stdout lines, skip system and intermediate streaming events, return
-  // the first human-readable content line.  assistant/user events are
-  // intermediate and contain raw JSON blobs that make poor error messages;
-  // result events are retained because they may carry useful error details
-  // (e.g. rate-limit messages).
+  // Walk stdout lines and skip every structured streaming event (any JSON
+  // object that carries a non-empty "type" field: system, assistant, user,
+  // rate_limit_event, result, …).  All of these are protocol artefacts and
+  // produce confusing raw-JSON blobs when surfaced verbatim as an error
+  // message.  Only plain-text lines (non-JSON, or JSON without a type field)
+  // are treated as human-readable content worth including in the error.
   const firstContentLine = stdout.split(/\r?\n/)
     .map((l) => l.trim())
     .find((l) => {
@@ -130,7 +131,7 @@ export function buildPartialRunError(
         const obj = JSON.parse(l);
         if (typeof obj === "object" && obj !== null) {
           const t = (obj as Record<string, unknown>).type;
-          if (t === "system" || t === "assistant" || t === "user") return false;
+          if (typeof t === "string" && t) return false;
         }
       } catch {
         // not JSON — treat as content
@@ -138,9 +139,9 @@ export function buildPartialRunError(
       return true;
     }) ?? "";
 
-  // If the stream contains only system/init and intermediate events with no
-  // plain-text or result output, surface the model name so the operator can
-  // diagnose missing credentials or unsupported model.
+  // If the stream contained only structured events with no plain-text output,
+  // surface the model name so the operator can diagnose missing credentials
+  // or unsupported/misconfigured model.
   const initOnlyOutput = stdout.trim() !== "" && model !== "" && !firstContentLine;
   if (initOnlyOutput) {
     const modelHint = model ? ` (model: ${model})` : "";
