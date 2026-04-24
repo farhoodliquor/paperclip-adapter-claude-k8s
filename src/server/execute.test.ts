@@ -577,6 +577,28 @@ describe("execute: concurrency guard", () => {
     expect(result.errorMessage).toContain("still running for this agent");
   });
 
+  it("ignores terminating jobs (deletionTimestamp set) and proceeds past the concurrency guard", async () => {
+    // A job being force-deleted has deletionTimestamp set but no Complete/Failed condition.
+    // The guard must treat it as terminal so subsequent runs are not blocked.
+    const terminating: k8s.V1Job = {
+      metadata: {
+        name: "terminating-job",
+        namespace: "paperclip",
+        labels: { "paperclip.io/agent-id": "agent-abc", "paperclip.io/adapter-type": "claude_k8s" },
+        deletionTimestamp: new Date(),
+      },
+      status: { conditions: [] },
+    };
+    mockBatchListJobs.mockResolvedValue({ items: [terminating] });
+    // Guard passes → next failure is job creation (no further mocks set up)
+    mockBatchCreateJob.mockRejectedValue(new Error("quota exceeded"));
+    mockPrepareBundle.mockResolvedValue(makeBundle());
+    const result = await execute(makeCtx());
+    // Must NOT be a concurrency error — the guard let us through
+    expect(result.errorCode).not.toBe("k8s_concurrent_run_blocked");
+    expect(result.errorCode).toBe("k8s_job_create_failed");
+  });
+
   it("reattaches to a matching orphan and returns k8s_pod_reattach_failed when pod is missing", async () => {
     // Orphan with matching taskId and sessionId → reattach classification → reattachTarget is set
     const orphan = makeJob({
