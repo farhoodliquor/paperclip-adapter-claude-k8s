@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { printClaudeStreamEvent } from "./format-event.js";
+import { printClaudeStreamEvent, formatClaudeStreamLine } from "./format-event.js";
 
 // Mock console methods to capture output
 const consoleMock = {
@@ -179,5 +179,105 @@ describe("printClaudeStreamEvent", () => {
   it("prints unknown types in debug mode", () => {
     printClaudeStreamEvent(JSON.stringify({ type: "unknown", data: "stuff" }), true);
     expect(output()).toContain("stuff");
+  });
+});
+
+describe("formatClaudeStreamLine", () => {
+  it("returns null for empty/blank lines", () => {
+    expect(formatClaudeStreamLine("")).toBeNull();
+    expect(formatClaudeStreamLine("   ")).toBeNull();
+  });
+
+  it("returns raw text for non-JSON lines (adapter status messages pass through)", () => {
+    expect(formatClaudeStreamLine("[paperclip] Pod running: pod-abc")).toBe("[paperclip] Pod running: pod-abc");
+    expect(formatClaudeStreamLine("Error: disk full")).toBe("Error: disk full");
+  });
+
+  it("formats system/init event", () => {
+    const result = formatClaudeStreamLine(JSON.stringify({
+      type: "system", subtype: "init", model: "claude-opus-4-7", session_id: "sess_abc",
+    }));
+    expect(result).toContain("Claude initialized");
+    expect(result).toContain("claude-opus-4-7");
+    expect(result).toContain("sess_abc");
+    expect(result).not.toContain("{");
+  });
+
+  it("formats assistant text block", () => {
+    const result = formatClaudeStreamLine(JSON.stringify({
+      type: "assistant",
+      message: { content: [{ type: "text", text: "Hello world" }] },
+    }));
+    expect(result).toBe("assistant: Hello world");
+  });
+
+  it("formats assistant thinking block", () => {
+    const result = formatClaudeStreamLine(JSON.stringify({
+      type: "assistant",
+      message: { content: [{ type: "thinking", thinking: "Let me think..." }] },
+    }));
+    expect(result).toBe("thinking: Let me think...");
+  });
+
+  it("formats assistant tool_use block", () => {
+    const result = formatClaudeStreamLine(JSON.stringify({
+      type: "assistant",
+      message: { content: [{ type: "tool_use", name: "Bash", input: { command: "ls" } }] },
+    }));
+    expect(result).toContain("tool_call: Bash");
+    expect(result).toContain("ls");
+  });
+
+  it("returns null for assistant with no printable content (thinking-only with empty text)", () => {
+    const result = formatClaudeStreamLine(JSON.stringify({
+      type: "assistant",
+      message: { content: [{ type: "thinking", thinking: "" }] },
+    }));
+    expect(result).toBeNull();
+  });
+
+  it("formats user tool_result", () => {
+    const result = formatClaudeStreamLine(JSON.stringify({
+      type: "user",
+      message: { content: [{ type: "tool_result", content: "file1.txt\nfile2.txt" }] },
+    }));
+    expect(result).toContain("tool_result");
+    expect(result).toContain("file1.txt");
+  });
+
+  it("formats user tool_result error", () => {
+    const result = formatClaudeStreamLine(JSON.stringify({
+      type: "user",
+      message: { content: [{ type: "tool_result", is_error: true, content: "Permission denied" }] },
+    }));
+    expect(result).toContain("tool_result (error)");
+    expect(result).toContain("Permission denied");
+  });
+
+  it("formats result event with tokens and cost", () => {
+    const result = formatClaudeStreamLine(JSON.stringify({
+      type: "result", result: "Done", subtype: "stop", total_cost_usd: 0.005,
+      usage: { input_tokens: 100, output_tokens: 200, cache_read_input_tokens: 50 },
+    }));
+    expect(result).toContain("result:");
+    expect(result).toContain("Done");
+    expect(result).toContain("in=100");
+    expect(result).toContain("out=200");
+    expect(result).toContain("cached=50");
+  });
+
+  it("formats rate_limit_event (FAR-32 repro)", () => {
+    const result = formatClaudeStreamLine(JSON.stringify({
+      type: "rate_limit_event",
+      rate_limit_info: { status: "allowed", resetsAt: 1777056000, rateLimitType: "five_hour" },
+    }));
+    expect(result).toContain("rate_limit:");
+    expect(result).toContain("five_hour");
+    expect(result).toContain("allowed");
+    expect(result).not.toContain("{");
+  });
+
+  it("returns null for unknown event types", () => {
+    expect(formatClaudeStreamLine(JSON.stringify({ type: "unknown_event", data: "x" }))).toBeNull();
   });
 });

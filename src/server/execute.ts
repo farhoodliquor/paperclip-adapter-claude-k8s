@@ -19,6 +19,7 @@ import {
 import { getSelfPodInfo, getBatchApi, getCoreApi, getLogApi } from "./k8s-client.js";
 import { buildJobManifest, sanitizeLabelValue } from "./job-manifest.js";
 import { LogLineDedupFilter } from "./log-dedup.js";
+import { formatClaudeStreamLine } from "../cli/format-event.js";
 import type * as k8s from "@kubernetes/client-node";
 import { Writable } from "node:stream";
 
@@ -353,13 +354,21 @@ export async function streamPodLogsOnce(
   const writable = new Writable({
     write(chunk: Buffer, _encoding, callback) {
       const text = chunk.toString("utf-8");
+      // Always store raw text — parseClaudeStreamJson needs the original
+      // stream-json lines to extract session IDs, usage, and result events.
       chunks.push(text);
       const emitted = dedup ? dedup.filter(text) : text;
       if (!emitted) {
         callback();
         return;
       }
-      void onLog("stdout", emitted).then(() => callback(), callback);
+      // Format each stream-json event into human-readable text before the
+      // Paperclip server sees it, matching claude_local output style.
+      // Non-JSON lines (adapter status messages, plain errors) pass through.
+      const formatted = emitted.split("\n")
+        .map((line) => formatClaudeStreamLine(line) ?? "")
+        .join("\n");
+      void onLog("stdout", formatted).then(() => callback(), callback);
     },
   });
 
