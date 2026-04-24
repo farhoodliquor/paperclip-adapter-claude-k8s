@@ -138,6 +138,39 @@ describe("printClaudeStreamEvent", () => {
     expect(output()).toBe("some output text");
   });
 
+  it("prints rate_limit_event with type, status, and reset time", () => {
+    printClaudeStreamEvent(JSON.stringify({
+      type: "rate_limit_event",
+      rate_limit_info: {
+        status: "allowed",
+        resetsAt: 1777056000,
+        rateLimitType: "five_hour",
+        overageStatus: "allowed",
+        isUsingOverage: false,
+      },
+      uuid: "3ab8f9eb-b9d6-4bf6-9c39-4608427717fc",
+      session_id: "ad5f3e11-3c0c-4144-b53d-d4b959e57cee",
+    }), false);
+    expect(output()).toContain("rate_limit:");
+    expect(output()).toContain("five_hour");
+    expect(output()).toContain("allowed");
+    expect(output()).toContain("resets=");
+    // Raw JSON must not be surfaced verbatim
+    expect(output()).not.toContain("3ab8f9eb-b9d6-4bf6-9c39-4608427717fc");
+  });
+
+  it("prints rate_limit_event with unknown fields gracefully", () => {
+    printClaudeStreamEvent(JSON.stringify({
+      type: "rate_limit_event",
+      rate_limit_info: {},
+    }), false);
+    expect(output()).toContain("rate_limit:");
+    expect(output()).toContain("type=unknown");
+    expect(output()).toContain("status=unknown");
+    // No resetsAt present — reset clause omitted
+    expect(output()).not.toContain("resets=");
+  });
+
   it("does not print unknown types in non-debug mode", () => {
     printClaudeStreamEvent(JSON.stringify({ type: "unknown", data: "stuff" }), false);
     expect(output()).toBe("");

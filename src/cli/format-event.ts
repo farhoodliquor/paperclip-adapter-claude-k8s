@@ -133,6 +133,22 @@ export function printClaudeStreamEvent(raw: string, debug: boolean): void {
     return;
   }
 
+  if (type === "rate_limit_event") {
+    const info =
+      typeof parsed.rate_limit_info === "object" && parsed.rate_limit_info !== null
+        ? (parsed.rate_limit_info as Record<string, unknown>)
+        : {};
+    const limitType = typeof info.rateLimitType === "string" ? info.rateLimitType : "unknown";
+    const status = typeof info.status === "string" ? info.status : "unknown";
+    const resetsAt = typeof info.resetsAt === "number"
+      ? new Date(info.resetsAt * 1000).toISOString()
+      : "";
+    const parts = [`rate_limit: type=${limitType} status=${status}`];
+    if (resetsAt) parts.push(`resets=${resetsAt}`);
+    console.log(pc.yellow(parts.join(" ")));
+    return;
+  }
+
   if (debug) {
     console.log(pc.gray(line));
   }
