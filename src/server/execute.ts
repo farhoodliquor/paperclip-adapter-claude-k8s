@@ -148,14 +148,35 @@ function isInitOnlyRun(model: string, stdout: string): boolean {
 }
 
 /**
+ * Append the pod's terminated-state detail (reason/message/signal) to a
+ * partial-run error message when available.  Exit code is already in the
+ * caller-supplied message, so we only append fields that add new signal —
+ * specifically reason (e.g. OOMKilled, Error, ContainerCannotRun), message
+ * (kubelet diagnostic text), and signal.  Saves the operator a kubectl trip.
+ */
+function appendPodCause(message: string, state: PodTerminatedState | null): string {
+  if (!state) return message;
+  const parts: string[] = [];
+  if (state.reason) parts.push(`reason=${state.reason}`);
+  if (state.message) parts.push(`message=${state.message}`);
+  if (state.signal !== null) parts.push(`signal=${state.signal}`);
+  if (state.exitCode === 137) parts.push("SIGKILL (commonly OOMKilled)");
+  if (parts.length === 0) return message;
+  return `${message} [pod: ${parts.join(", ")}]`;
+}
+
+/**
  * Build the error message when Claude's stdout contains no result event.
  * Skips system/init event lines so the UI doesn't display the raw init JSON.
+ * When `podState` is provided, appends the K8s container terminated reason/
+ * message so failures self-explain without requiring `kubectl`.
  * Exported for unit tests.
  */
 export function buildPartialRunError(
   exitCode: number | null,
   model: string,
   stdout: string,
+  podState: PodTerminatedState | null = null,
 ): string {
   if (exitCode === 0) return "Failed to parse Claude JSON output";
 
@@ -164,21 +185,27 @@ export function buildPartialRunError(
   // or unsupported/misconfigured model.
   const contentLine = firstContentLine(stdout);
   if (contentLine) {
-    return `Claude exited with code ${exitCode ?? -1}: ${contentLine}`;
+    return appendPodCause(`Claude exited with code ${exitCode ?? -1}: ${contentLine}`, podState);
   }
 
   if (isInitOnlyRun(model, stdout) && (exitCode ?? 0) !== 0) {
     const modelHint = model ? ` (model: ${model})` : "";
-    return `Claude exited immediately after init${modelHint} (exit code ${exitCode ?? -1}) — the model may be unsupported or the session may have been rejected before producing output`;
+    return appendPodCause(
+      `Claude exited immediately after init${modelHint} (exit code ${exitCode ?? -1}) — the model may be unsupported or the session may have been rejected before producing output`,
+      podState,
+    );
   }
 
   const initOnlyOutput = stdout.trim() !== "" && model !== "";
   if (initOnlyOutput) {
     const modelHint = model ? ` (model: ${model})` : "";
-    return `Claude started but did not produce a result${modelHint} — check API credentials, model support, and adapter config`;
+    return appendPodCause(
+      `Claude started but did not produce a result${modelHint} — check API credentials, model support, and adapter config`,
+      podState,
+    );
   }
 
-  return `Claude exited with code ${exitCode ?? -1}`;
+  return appendPodCause(`Claude exited with code ${exitCode ?? -1}`, podState);
 }
 
 export type OrphanClassification =
@@ -1463,7 +1490,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       exitCode,
       signal: null,
       timedOut: false,
-      errorMessage: buildPartialRunError(exitCode, parsedStream.model, stdout),
+      errorMessage: buildPartialRunError(exitCode, parsedStream.model, stdout, podTerminatedState),
       resultJson: { stdout },
     };
   }

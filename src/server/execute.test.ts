@@ -245,6 +245,44 @@ describe("buildPartialRunError", () => {
     const msg = buildPartialRunError(1, "model-x", stdout);
     expect(msg).toBe("Claude exited with code 1: real error line");
   });
+
+  it("appends pod terminated reason/message when state is provided (FAR-100)", () => {
+    const msg = buildPartialRunError(1, "claude-sonnet-4-6", initLine, {
+      exitCode: 1,
+      reason: "Error",
+      message: "model not supported",
+      signal: null,
+    });
+    expect(msg).toContain("Claude exited immediately after init");
+    expect(msg).toContain("claude-sonnet-4-6");
+    expect(msg).toContain("[pod: reason=Error, message=model not supported]");
+  });
+
+  it("flags exit 137 as OOMKilled in pod cause", () => {
+    const msg = buildPartialRunError(137, "claude-sonnet-4-6", initLine, {
+      exitCode: 137,
+      reason: "OOMKilled",
+      message: null,
+      signal: null,
+    });
+    expect(msg).toContain("[pod: reason=OOMKilled, SIGKILL (commonly OOMKilled)]");
+  });
+
+  it("appends pod cause to content-line message", () => {
+    const stdout = [initLine, "Error: bad request"].join("\n");
+    const msg = buildPartialRunError(1, "claude-sonnet-4-6", stdout, {
+      exitCode: 1,
+      reason: "Error",
+      message: null,
+      signal: null,
+    });
+    expect(msg).toBe("Claude exited with code 1: Error: bad request [pod: reason=Error]");
+  });
+
+  it("does not append anything when podState is null (back-compat)", () => {
+    const msg = buildPartialRunError(1, "claude-sonnet-4-6", initLine, null);
+    expect(msg).not.toContain("[pod:");
+  });
 });
 
 describe("classifyOrphan", () => {
