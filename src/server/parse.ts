@@ -19,6 +19,10 @@ export function parseClaudeStreamJson(stdout: string) {
   // with no subsequent result event — indicates the upstream LLM API returned
   // an empty/malformed response (e.g. MiniMax degraded performance).
   let llmApiEmptyResponse = false;
+  // Set when an assistant event with output_tokens > 0 was seen but no result
+  // event arrived — indicates the run was truncated mid-stream (pod terminated,
+  // OOMKill, or claude CLI crash after producing content).
+  let assistantContentSeen = false;
 
   for (const rawLine of stdout.split(/\r?\n/)) {
     const line = rawLine.trim();
@@ -49,6 +53,9 @@ export function parseClaudeStreamJson(stdout: string) {
       if (stopReason === null && outputTokens === 0) {
         llmApiEmptyResponse = true;
       }
+      if (outputTokens > 0) {
+        assistantContentSeen = true;
+      }
 
       for (let i = 0; i < content.length; i++) {
         const entry = content[i];
@@ -72,6 +79,7 @@ export function parseClaudeStreamJson(stdout: string) {
     if (type === "result") {
       finalResult = event;
       llmApiEmptyResponse = false; // result event means Claude completed normally
+      assistantContentSeen = false; // result event means stream was not truncated
       sessionId = asString(event.session_id, sessionId ?? "") || sessionId;
     }
   }
@@ -85,6 +93,7 @@ export function parseClaudeStreamJson(stdout: string) {
       summary: assistantTexts.join("\n\n").trim(),
       resultJson: null as Record<string, unknown> | null,
       llmApiEmptyResponse,
+      truncatedMidStream: assistantContentSeen,
     };
   }
 
@@ -106,6 +115,7 @@ export function parseClaudeStreamJson(stdout: string) {
     summary,
     resultJson: finalResult,
     llmApiEmptyResponse: false,
+    truncatedMidStream: false,
   };
 }
 

@@ -994,6 +994,44 @@ describe("execute: happy path", () => {
     expect(result.errorMessage).toContain("output_tokens: 0");
   });
 
+  it("returns claude_truncated when assistant produced content but no result event arrived (FAR-95)", async () => {
+    const truncatedOutput = [
+      JSON.stringify({ type: "system", subtype: "init", model: "claude-opus-4-7", session_id: "sess_trunc" }),
+      JSON.stringify({
+        type: "assistant",
+        session_id: "sess_trunc",
+        message: {
+          id: "msg_trunc",
+          stop_reason: null,
+          usage: { input_tokens: 1, output_tokens: 35, cache_creation_input_tokens: 523, cache_read_input_tokens: 46295 },
+          content: [{ type: "tool_use", id: "tool_1", name: "Bash", input: { command: "echo hi" } }],
+        },
+      }),
+      JSON.stringify({
+        type: "user",
+        message: { role: "user", content: [{ tool_use_id: "tool_1", type: "tool_result", content: "hi", is_error: false }] },
+      }),
+    ].join("\n") + "\n";
+
+    mockLogFn.mockImplementation(
+      async (_ns: string, _pod: string, _ctr: string, writable: Writable) => {
+        writable.write(truncatedOutput);
+      },
+    );
+    mockCoreListPods.mockResolvedValue({
+      items: [{ metadata: { name: "pod-abc" }, status: { containerStatuses: [{ name: "claude", state: { terminated: { exitCode: 137 } } }] } }],
+    });
+
+    const executePromise = execute(makeCtx());
+    await vi.advanceTimersByTimeAsync(3_100);
+    const result = await executePromise;
+
+    expect(result.errorCode).toBe("claude_truncated");
+    expect(result.errorMessage).toContain("truncated mid-stream");
+    expect(result.errorMessage).toContain("claude-opus-4-7");
+    expect(result.errorMessage).toContain("exit code 137");
+  });
+
   it("reconnects log stream and logs status when job completion takes > 3s", async () => {
     // Make waitForJobCompletion take 4s so the 3s stream reconnect fires first.
     // timeoutSec=4, graceSec=0 → completionTimeoutMs=4000.

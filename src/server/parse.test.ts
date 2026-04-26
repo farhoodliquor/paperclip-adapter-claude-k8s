@@ -224,6 +224,50 @@ more raw output`;
     expect(result.resultJson).not.toBeNull();
   });
 
+  it("sets truncatedMidStream=true when assistant event with output_tokens>0 has no result (FAR-95)", () => {
+    const initLine = JSON.stringify({ type: "system", subtype: "init", model: "claude-opus-4-7", session_id: "sess_1" });
+    const assistantEvent = JSON.stringify({
+      type: "assistant",
+      session_id: "sess_1",
+      message: {
+        id: "msg_abc",
+        stop_reason: null,
+        usage: { input_tokens: 1, output_tokens: 35, cache_creation_input_tokens: 523, cache_read_input_tokens: 46295 },
+        content: [{ type: "tool_use", id: "tool_1", name: "Bash", input: { command: "echo hi" } }],
+      },
+    });
+    const result = parseClaudeStreamJson([initLine, assistantEvent].join("\n"));
+    expect(result.truncatedMidStream).toBe(true);
+    expect(result.llmApiEmptyResponse).toBe(false);
+    expect(result.resultJson).toBeNull();
+  });
+
+  it("clears truncatedMidStream when a result event follows assistant content", () => {
+    const assistantEvent = JSON.stringify({
+      type: "assistant",
+      message: { stop_reason: null, usage: { output_tokens: 35 }, content: [] },
+    });
+    const resultEvent = JSON.stringify({
+      type: "result",
+      result: "Done",
+      subtype: "stop",
+      total_cost_usd: 0.001,
+      usage: { input_tokens: 10, output_tokens: 5, cache_read_input_tokens: 0 },
+    });
+    const result = parseClaudeStreamJson([assistantEvent, resultEvent].join("\n"));
+    expect(result.truncatedMidStream).toBe(false);
+    expect(result.resultJson).not.toBeNull();
+  });
+
+  it("does not set truncatedMidStream when assistant has output_tokens=0", () => {
+    const assistantEvent = JSON.stringify({
+      type: "assistant",
+      message: { stop_reason: null, usage: { output_tokens: 0 }, content: [] },
+    });
+    const result = parseClaudeStreamJson(assistantEvent);
+    expect(result.truncatedMidStream).toBe(false);
+  });
+
   it("sets llmApiEmptyResponse=false for normal result", () => {
     const resultEvent = JSON.stringify({
       type: "result",

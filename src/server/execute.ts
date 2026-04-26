@@ -1367,6 +1367,18 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         resultJson: { stdout },
       };
     }
+    if (parsedStream.truncatedMidStream) {
+      const exitHint = exitCode === null ? "no exit code" : `exit code ${exitCode}`;
+      const modelHint = parsedStream.model ? ` (model: ${parsedStream.model})` : "";
+      return {
+        exitCode,
+        signal: null,
+        timedOut: false,
+        errorMessage: `Claude run was truncated mid-stream${modelHint} — assistant produced content but no result event arrived (${exitHint}); pod may have been terminated, OOMKilled, or the CLI crashed`,
+        errorCode: "claude_truncated",
+        resultJson: { stdout },
+      };
+    }
     return {
       exitCode,
       signal: null,
