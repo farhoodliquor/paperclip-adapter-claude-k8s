@@ -650,28 +650,80 @@ export interface PodTerminatedState {
   signal: number | null;
 }
 
-async function getPodTerminatedState(
+/**
+ * Result of a pod-state lookup.  `state` is the terminated state when available;
+ * `phase` and `podMissing` give the caller enough context to render an honest
+ * truncation-cause message instead of guessing "likely deleted" (FAR-107).
+ */
+export interface PodLookupResult {
+  state: PodTerminatedState | null;
+  phase: string | null;
+  podMissing: boolean;
+}
+
+async function lookupPodState(
   namespace: string,
   jobName: string,
   kubeconfigPath?: string,
-): Promise<PodTerminatedState | null> {
+): Promise<PodLookupResult> {
   const coreApi = getCoreApi(kubeconfigPath);
   const podList = await coreApi.listNamespacedPod({
     namespace,
     labelSelector: `job-name=${jobName}`,
   });
   const pod = podList.items[0];
-  if (!pod) return null;
+  if (!pod) return { state: null, phase: null, podMissing: true };
 
+  const phase = pod.status?.phase ?? null;
   const containerStatus = pod.status?.containerStatuses?.find((s) => s.name === "claude");
   const terminated = containerStatus?.state?.terminated;
-  if (!terminated) return null;
+  if (!terminated) return { state: null, phase, podMissing: false };
   return {
-    exitCode: terminated.exitCode ?? null,
-    reason: terminated.reason ?? null,
-    message: (terminated.message ?? "").trim() || null,
-    signal: terminated.signal ?? null,
+    state: {
+      exitCode: terminated.exitCode ?? null,
+      reason: terminated.reason ?? null,
+      message: (terminated.message ?? "").trim() || null,
+      signal: terminated.signal ?? null,
+    },
+    phase,
+    podMissing: false,
   };
+}
+
+/**
+ * Read the claude container's terminated state, retrying briefly when the pod
+ * exists in a terminal phase but kubelet has not yet propagated the
+ * containerStatuses[].state.terminated field.  Without this retry, fast
+ * truncated-stream exits surface as "pod state unavailable" (FAR-107) and
+ * mask the real exit code / OOMKilled / SIGTERM cause.
+ */
+async function getPodLookupWithRetry(
+  namespace: string,
+  jobName: string,
+  kubeconfigPath?: string,
+  attempts = 4,
+  delayMs = 500,
+): Promise<PodLookupResult> {
+  let last: PodLookupResult = { state: null, phase: null, podMissing: true };
+  for (let i = 0; i < attempts; i++) {
+    last = await lookupPodState(namespace, jobName, kubeconfigPath);
+    if (last.state) return last;
+    if (last.podMissing) return last;
+    // Pod exists but no terminated state.  If it is in a terminal phase the
+    // containerStatuses update is in flight — wait briefly and retry.  If it
+    // is still Running/Pending, retrying is unlikely to help, so bail.
+    if (last.phase !== "Succeeded" && last.phase !== "Failed") return last;
+    if (i < attempts - 1) await new Promise((r) => setTimeout(r, delayMs));
+  }
+  return last;
+}
+
+async function getPodTerminatedState(
+  namespace: string,
+  jobName: string,
+  kubeconfigPath?: string,
+): Promise<PodTerminatedState | null> {
+  return (await lookupPodState(namespace, jobName, kubeconfigPath)).state;
 }
 
 /**
@@ -682,9 +734,17 @@ async function getPodTerminatedState(
  */
 export function describeTruncationCause(
   state: PodTerminatedState | null,
+  lookup?: PodLookupResult,
 ): string {
   if (!state) {
-    return "pod state unavailable — likely deleted before exit could be read";
+    if (lookup?.podMissing) {
+      return "pod is gone — Job pod was removed (eviction, preemption, or external delete) before exit could be read";
+    }
+    if (lookup && !lookup.podMissing) {
+      const phaseHint = lookup.phase ? `pod phase=${lookup.phase}` : "pod present";
+      return `container terminated state not yet observable (${phaseHint}) — kubelet status update did not land within retry window; exit cause unknown`;
+    }
+    return "pod state unavailable — exit cause unknown";
   }
   const parts: string[] = [];
   if (state.exitCode !== null) {
@@ -1554,7 +1614,23 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       };
     }
     if (parsedStream.truncatedMidStream) {
-      const cause = describeTruncationCause(podTerminatedState);
+      // Re-query pod state with retry — the initial single-shot read can lose
+      // to kubelet propagation lag and surface a useless "pod state unavailable"
+      // message that hides the real exit cause (OOMKilled, SIGTERM, etc).  The
+      // retry distinguishes pod-genuinely-gone from terminated-state-lag and
+      // gives the operator the actual exit code/reason where possible (FAR-107).
+      let lookup: PodLookupResult | undefined;
+      let refreshedState = podTerminatedState;
+      try {
+        lookup = await getPodLookupWithRetry(namespace, jobName, kubeconfigPath);
+        refreshedState = lookup.state;
+        if (refreshedState && refreshedState.exitCode !== null) {
+          exitCode = refreshedState.exitCode;
+        }
+      } catch (err) {
+        await onLog("stderr", `[paperclip] truncation diagnostic: pod re-query failed (${err instanceof Error ? err.message : String(err)})\n`).catch(() => {});
+      }
+      const cause = describeTruncationCause(refreshedState, lookup);
       const modelHint = parsedStream.model ? ` (model: ${parsedStream.model})` : "";
       return {
         exitCode,
