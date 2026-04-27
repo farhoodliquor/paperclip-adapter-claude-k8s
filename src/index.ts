@@ -1,7 +1,7 @@
+import { DIRECT_MODELS, BEDROCK_MODELS, isBedrockEnv } from "./server/models.js";
+
 export const type = "claude_k8s";
 export const label = "Claude (Kubernetes)";
-
-import { DIRECT_MODELS, BEDROCK_MODELS, isBedrockEnv } from "./server/models.js";
 export const models = isBedrockEnv() ? BEDROCK_MODELS : DIRECT_MODELS;
 
 export const agentConfigurationDoc = `# claude_k8s agent configuration
