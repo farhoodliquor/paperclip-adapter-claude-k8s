@@ -60,10 +60,6 @@ Kubernetes fields:
 - retainJobs (boolean, optional): skip cleanup on completion for debugging
 - reattachOrphanedJobs (boolean, optional): when true (default), attach to a running orphaned Job that matches the current agent/task/session instead of blocking; when false, any non-terminal orphan blocks the new run
 
-Output filtering fields:
-- enableRtk (boolean, optional): truncate oversized tool outputs before they reach the model via a PostToolUse hook; default false
-- rtkMaxOutputBytes (number, optional): byte threshold for tool output truncation when enableRtk is true; default 50000
-
 Operational fields:
 - timeoutSec (number, optional): run timeout in seconds; 0 means no timeout
 - graceSec (number, optional): additional grace before adapter gives up after Job deadline
