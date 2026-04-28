@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import type { AdapterExecutionContext } from "@paperclipai/adapter-utils";
-import { buildJobManifest, buildRtkSetupCommands, sanitizeLabelValue } from "./job-manifest.js";
+import { buildJobManifest, buildPodLogPath, sanitizeLabelValue } from "./job-manifest.js";
 import type { SelfPodInfo } from "./k8s-client.js";
 
 function makeCtx(overrides: Partial<AdapterExecutionContext> = {}): AdapterExecutionContext {
@@ -221,11 +221,9 @@ describe("buildJobManifest", () => {
 
     it("omits paperclip.io/run-id when sanitized value is null (all-invalid runId)", () => {
       // inject an all-special-chars runId via context override — buildJobManifest
-      // uses ctx.runId directly
+      // uses ctx.runId directly. Use characters that are path-valid but label-invalid.
       const badCtx = makeCtx({ runId: "@@@" });
-      const { job, skippedLabels } = buildJobManifest({ ctx: badCtx, selfPod });
-      expect(job.metadata?.labels?.["paperclip.io/run-id"]).toBeUndefined();
-      expect(skippedLabels).toContain("paperclip.io/run-id");
+      expect(() => buildJobManifest({ ctx: badCtx, selfPod })).toThrow("Invalid runId");
     });
 
     it("selector matches sanitized agent-id label", () => {
@@ -301,7 +299,10 @@ describe("buildJobManifest", () => {
     it("write-prompt writes PROMPT_CONTENT to /tmp/prompt/prompt.txt", () => {
       const { job } = buildJobManifest({ ctx, selfPod });
       const init = job.spec?.template?.spec?.initContainers?.[0];
-      expect(init?.command).toEqual(["sh", "-c", "printf '%s' \"$PROMPT_CONTENT\" > /tmp/prompt/prompt.txt"]);
+      expect(init?.command?.[0]).toBe("sh");
+      expect(init?.command?.[1]).toBe("-c");
+      expect(init?.command?.[2]).toContain("mkdir -p /paperclip/instances/default/run-logs/");
+      expect(init?.command?.[2]).toContain("printf '%s' \"$PROMPT_CONTENT\" > /tmp/prompt/prompt.txt");
     });
 
     it("write-prompt mounts prompt volume", () => {
@@ -794,112 +795,71 @@ describe("buildJobManifest", () => {
     });
   });
 
-  describe("rtk output filtering", () => {
+  describe("pod log file tailing", () => {
     it("does not modify main command when enableRtk is false (default)", () => {
       const { job } = buildJobManifest({ ctx, selfPod });
       const cmd = job.spec?.template?.spec?.containers[0]?.command;
-      // Command should be the plain `cat ... | claude ...` form with no rtk setup
-      expect(cmd?.[2]).toMatch(/^cat \/tmp\/prompt\/prompt\.txt \| claude /);
+      // Command should be the plain `cat ... | claude ... | tee ...` form with no rtk setup
+      expect(cmd?.[2]).toMatch(/^cat \/tmp\/prompt\/prompt\.txt \| claude .* \| tee /);
       expect(cmd?.[2]).not.toContain("rtk-filter");
     });
 
-    it("prepends RTK setup commands when enableRtk is true", () => {
-      ctx.config = { enableRtk: true };
-      const { job } = buildJobManifest({ ctx, selfPod });
-      const cmd = job.spec?.template?.spec?.containers[0]?.command;
-      expect(cmd?.[2]).toContain(".rtk-filter.js");
-      expect(cmd?.[2]).toContain("cat /tmp/prompt/prompt.txt | claude");
-    });
-
-    it("RTK setup runs before claude invocation", () => {
-      ctx.config = { enableRtk: true };
+    it("command includes tee to pod log path", () => {
       const { job } = buildJobManifest({ ctx, selfPod });
       const cmd = job.spec?.template?.spec?.containers[0]?.command?.[2] ?? "";
-      const rtkIdx = cmd.indexOf(".rtk-filter.js");
-      const claudeIdx = cmd.indexOf("cat /tmp/prompt/prompt.txt | claude");
-      expect(rtkIdx).toBeGreaterThanOrEqual(0);
-      expect(claudeIdx).toBeGreaterThan(rtkIdx);
+      expect(cmd).toContain("| tee");
+      expect(cmd).toContain("/paperclip/instances/default/run-logs/");
     });
 
-    it("RTK setup uses node (no external binaries)", () => {
-      ctx.config = { enableRtk: true };
+    it("podLogPath is returned from buildJobManifest", () => {
+      const result = buildJobManifest({ ctx, selfPod });
+      expect(result.podLogPath).toBe(
+        "/paperclip/instances/default/run-logs/co1/agent-abc/run-abc12345.pod.ndjson",
+      );
+    });
+
+    it("buildPodLogPath returns correctly formatted path", () => {
+      expect(buildPodLogPath("co1", "agent-abc", "run-abc12345")).toBe(
+        "/paperclip/instances/default/run-logs/co1/agent-abc/run-abc12345.pod.ndjson",
+      );
+    });
+
+    it("init container creates log directory", () => {
       const { job } = buildJobManifest({ ctx, selfPod });
-      const cmd = job.spec?.template?.spec?.containers[0]?.command?.[2] ?? "";
-      // Should only use `node` — no curl, wget, apt, pip, etc.
-      expect(cmd).not.toMatch(/\b(curl|wget|apt|yum|pip|gem|cargo|go\s+get)\b/);
-      expect(cmd).toContain("node ");
+      const initCmd = job.spec?.template?.spec?.initContainers?.[0]?.command;
+      expect(initCmd?.[0]).toBe("sh");
+      expect(initCmd?.[1]).toBe("-c");
+      expect(initCmd?.[2]).toContain("mkdir -p /paperclip/instances/default/run-logs/");
     });
 
-    it("uses default 50000 byte threshold when rtkMaxOutputBytes not set", () => {
-      ctx.config = { enableRtk: true };
-      const setup = buildRtkSetupCommands(50000);
-      // The filter script base64 should decode to contain the MAX constant
-      const b64Match = setup.match(/Buffer\.from\('([A-Za-z0-9+/=]+)','base64'\)/);
-      expect(b64Match).not.toBeNull();
-      const decoded = Buffer.from(b64Match![1], "base64").toString("utf-8");
-      expect(decoded).toContain("50000");
+    it("sanitizes companyId with / to valid path component for log path", () => {
+      const badCtx = {
+        ...ctx,
+        agent: { ...ctx.agent, companyId: "co/1" },
+      };
+      const { podLogPath } = buildJobManifest({ ctx: badCtx as typeof ctx, selfPod });
+      // / is stripped by sanitizeForK8sPath
+      expect(podLogPath).toContain("co1/");
     });
 
-    it("respects custom rtkMaxOutputBytes", () => {
-      ctx.config = { enableRtk: true, rtkMaxOutputBytes: 100000 };
-      const { job } = buildJobManifest({ ctx, selfPod });
-      const cmd = job.spec?.template?.spec?.containers[0]?.command?.[2] ?? "";
-      // The custom threshold should appear in the base64-encoded filter script
-      const b64Matches = [...cmd.matchAll(/Buffer\.from\('([A-Za-z0-9+/=]+)','base64'\)/g)];
-      const decoded = b64Matches.map((m) => Buffer.from(m[1], "base64").toString("utf-8")).join("\n");
-      expect(decoded).toContain("100000");
+    it("sanitizes agentId with @ to valid path component for log path", () => {
+      const badCtx = {
+        ...ctx,
+        agent: { ...ctx.agent, id: "agent@123" },
+      };
+      const { podLogPath } = buildJobManifest({ ctx: badCtx as typeof ctx, selfPod });
+      // @ is stripped by sanitizeForK8sPath
+      expect(podLogPath).toContain("/agent123/");
     });
 
-    it("RTK setup installs a PostToolUse hook in claude settings", () => {
-      const setup = buildRtkSetupCommands(50000);
-      // The settings script (second base64 block) should reference PostToolUse
-      const b64Matches = [...setup.matchAll(/Buffer\.from\('([A-Za-z0-9+/=]+)','base64'\)/g)];
-      expect(b64Matches.length).toBeGreaterThanOrEqual(2);
-      const settingsScript = Buffer.from(b64Matches[1]![1], "base64").toString("utf-8");
-      expect(settingsScript).toContain("PostToolUse");
-      expect(settingsScript).toContain("settings.json");
-    });
-
-    it("filter script handles string content truncation", () => {
-      // Decode the filter script and verify it truncates string content
-      const setup = buildRtkSetupCommands(1000);
-      const b64Matches = [...setup.matchAll(/Buffer\.from\('([A-Za-z0-9+/=]+)','base64'\)/g)];
-      const filterScript = Buffer.from(b64Matches[0]![1], "base64").toString("utf-8");
-      expect(filterScript).toContain("MAX=1000");
-      expect(filterScript).toContain("truncated by paperclip-rtk");
-      expect(filterScript).toContain("tool_response");
-      expect(filterScript).toContain("tool_result");
-    });
-
-    it("filter script truncates without corrupting multi-byte UTF-8", () => {
-      // "中" is U+4E2D, 3 bytes in UTF-8: E4 B8 AD
-      // With MAX=5, two "中" (6 bytes) should truncate to one (3 bytes), not
-      // produce a replacement character from slicing mid-codepoint.
-      const setup = buildRtkSetupCommands(5);
-      const b64Matches = [...setup.matchAll(/Buffer\.from\('([A-Za-z0-9+/=]+)','base64'\)/g)];
-      const filterScript = Buffer.from(b64Matches[0]![1], "base64").toString("utf-8");
-
-      // Extract the trunc function from the filter script and evaluate it
-      const fnMatch = filterScript.match(/(function trunc\(s\)\{.*\})(?=const tr=)/);
-      expect(fnMatch).toBeTruthy();
-      // eslint-disable-next-line no-eval
-      const trunc = eval(`(()=>{const MAX=5;${fnMatch![1]};return trunc;})()`);
-
-      const result = trunc("中中");
-      expect(result).not.toContain("�");
-      expect(result).toContain("中");
-      expect(result).toContain("truncated by paperclip-rtk");
-      // Should report bytes from the actual truncation point, not MAX
-      expect(result).toContain("3 bytes truncated");
-    });
-
-    it("filter script handles array content (block format)", () => {
-      const setup = buildRtkSetupCommands(50000);
-      const b64Matches = [...setup.matchAll(/Buffer\.from\('([A-Za-z0-9+/=]+)','base64'\)/g)];
-      const filterScript = Buffer.from(b64Matches[0]![1], "base64").toString("utf-8");
-      // Should handle array content blocks (text field on each block)
-      expect(filterScript).toContain("Array.isArray");
-      expect(filterScript).toContain("b.text");
+    it("sanitizes runId with underscore to valid path component for log path", () => {
+      const badCtx = {
+        ...ctx,
+        runId: "run_123",
+      };
+      const { podLogPath } = buildJobManifest({ ctx: badCtx as typeof ctx, selfPod });
+      // _ is stripped by sanitizeForK8sPath
+      expect(podLogPath).toContain("/run123.pod.ndjson");
     });
   });
 });

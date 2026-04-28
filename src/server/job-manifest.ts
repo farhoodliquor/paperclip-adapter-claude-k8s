@@ -12,85 +12,18 @@ import {
 import { createHash } from "node:crypto";
 import type { ClaudePromptBundle } from "./prompt-cache.js";
 
-/**
- * Build the shell command prefix that installs a native Node.js PostToolUse
- * hook into Claude Code's settings.  The hook truncates oversized tool outputs
- * before they reach the model — replacing the RTK binary init-container
- * approach with a self-contained Node.js implementation.
- *
- * Both scripts are base64-encoded so they can be embedded in a sh -c command
- * string without any quoting or escaping issues.
- *
- * @param maxOutputBytes  Byte threshold above which tool output is truncated.
- * @returns               A shell command string (suitable for "&&"-chaining
- *                        before the claude invocation).
- */
-export function buildRtkSetupCommands(maxOutputBytes: number): string {
-  // --- Filter script ----------------------------------------------------------
-  // This script runs as the PostToolUse hook inside every K8s Job pod.
-  // Claude Code writes the hook event as JSON to the script's stdin; the script
-  // truncates the tool_response/tool_result content when it exceeds the
-  // threshold and writes the (possibly modified) JSON to stdout.
-  //
-  // Field-name coverage:
-  //   • tool_response — documented hook event format for PostToolUse
-  //   • tool_result   — alternative name seen in some Claude Code versions
-  // Content may be a plain string or an array of typed blocks (text/image/…).
-  const filterScript = [
-    `const c=[];`,
-    `process.stdin.on('data',d=>c.push(d));`,
-    `process.stdin.on('end',()=>{`,
-    `const raw=Buffer.concat(c).toString('utf-8');`,
-    `let o;try{o=JSON.parse(raw);}catch{process.stdout.write(raw);return;}`,
-    `const MAX=${maxOutputBytes};`,
-    `function trunc(s){`,
-    `if(typeof s!=='string')return s;`,
-    `const b=Buffer.from(s,'utf-8');`,
-    `if(b.length<=MAX)return s;`,
-    `let e=MAX;if(e>0){let p=e-1;while(p>0&&(b[p]&0xC0)===0x80)p--;const l=b[p];let n=1;if((l&0xE0)===0xC0)n=2;else if((l&0xF0)===0xE0)n=3;else if((l&0xF8)===0xF0)n=4;if(p+n>e)e=p;}`,
-    `return b.slice(0,e).toString('utf-8')+'\\n[...'+(b.length-e)+' bytes truncated by paperclip-rtk]';`,
-    `}`,
-    `const tr=o&&(o.tool_response||o.tool_result);`,
-    `if(tr){`,
-    `if(typeof tr.content==='string'){tr.content=trunc(tr.content);}`,
-    `else if(Array.isArray(tr.content)){`,
-    `tr.content=tr.content.map(function(b){`,
-    `if(b&&typeof b==='object'&&typeof b.text==='string'){`,
-    `return Object.assign({},b,{text:trunc(b.text)});`,
-    `}return b;`,
-    `});`,
-    `}`,
-    `}`,
-    `process.stdout.write(JSON.stringify(o));`,
-    `});`,
-  ].join("");
+function assertSafePathComponent(field: string, value: string): void {
+  if (!/^[a-zA-Z0-9-]+$/.test(value)) {
+    throw new Error(`Invalid ${field} for log path: ${value}`);
+  }
+}
 
-  // --- Settings script --------------------------------------------------------
-  // Reads the existing ~/.claude/settings.json (if any), merges in the RTK
-  // PostToolUse hook, and writes the file back.  All other settings sections
-  // are preserved; only PostToolUse is replaced so we own the full hook list
-  // for this run.
-  const settingsScript = [
-    `const fs=require('fs'),pt=require('path');`,
-    `const p=pt.join(process.env.HOME,'.claude','settings.json');`,
-    `let s={};try{s=JSON.parse(fs.readFileSync(p,'utf-8'));}catch(e){}`,
-    `s.hooks=s.hooks||{};`,
-    `s.hooks.PostToolUse=[{matcher:'.*',hooks:[{type:'command',command:'node /tmp/.rtk-filter.js'}]}];`,
-    `fs.mkdirSync(pt.dirname(p),{recursive:true});`,
-    `fs.writeFileSync(p,JSON.stringify(s));`,
-  ].join("");
+function sanitizeForK8sPath(value: string): string {
+  return value.replace(/[^a-zA-Z0-9-]/g, "");
+}
 
-  // Encode as base64 so the strings can be embedded directly in a shell command
-  // without any quoting concerns (base64 alphabet: A-Za-z0-9+/=).
-  const filterB64 = Buffer.from(filterScript, "utf-8").toString("base64");
-  const settingsB64 = Buffer.from(settingsScript, "utf-8").toString("base64");
-
-  return [
-    // Write the filter script
-    `node -e "require('fs').writeFileSync('/tmp/.rtk-filter.js',Buffer.from('${filterB64}','base64').toString('utf-8'))"`,
-    // Install the Claude Code PostToolUse hook (merge into existing settings)
-    `node -e "eval(Buffer.from('${settingsB64}','base64').toString('utf-8'))"`,
-  ].join(" && ");
+export function buildPodLogPath(companyId: string, agentId: string, runId: string): string {
+  return `/paperclip/instances/default/run-logs/${companyId}/${agentId}/${runId}.pod.ndjson`;
 }
 
 /** Prompts above this size (bytes) are staged via a Secret instead of an
@@ -202,6 +135,8 @@ export interface JobBuildResult {
   promptSecret: PromptSecret | null;
   /** User-supplied extra labels that were dropped because they used a reserved prefix. */
   skippedLabels: string[];
+  /** Path to the pod log file on the shared PVC. */
+  podLogPath: string;
 }
 
 function sanitizeForK8sName(value: string, maxLen = 16): string {
@@ -353,8 +288,6 @@ export function buildJobManifest(input: JobBuildInput): JobBuildResult {
   const nodeSelector = parseKeyValueConfig(config.nodeSelector);
   const tolerations = Array.isArray(config.tolerations) ? config.tolerations : [];
   const extraLabels = parseKeyValueConfig(config.labels);
-  const enableRtk = asBoolean(config.enableRtk, false);
-  const rtkMaxOutputBytes = asNumber(config.rtkMaxOutputBytes, 50000);
 
   // Resolve working directory — use workspace cwd, fall back to /paperclip
   const workspaceContext = parseObject(context.paperclipWorkspace);
@@ -535,13 +468,15 @@ export function buildJobManifest(input: JobBuildInput): JobBuildResult {
 
   // Build the claude command string for the main container
   const claudeArgsEscaped = claudeArgs.map((a) => `'${a.replace(/'/g, "'\\''")}'`).join(" ");
-  const claudeInvocation = `cat /tmp/prompt/prompt.txt | claude ${claudeArgsEscaped}`;
-  // When RTK output filtering is enabled, prepend the Node.js hook setup.
-  // This writes a filter script and a Claude Code settings file that installs
-  // it as a PostToolUse hook — no external binary or init container required.
-  const mainCommand = enableRtk
-    ? `${buildRtkSetupCommands(rtkMaxOutputBytes)} && ${claudeInvocation}`
-    : claudeInvocation;
+  const logPathCompanyId = sanitizeForK8sPath(agent.companyId);
+  const logPathAgentId = sanitizeForK8sPath(agent.id);
+  const logPathRunId = sanitizeForK8sPath(runId);
+  assertSafePathComponent("companyId", logPathCompanyId);
+  assertSafePathComponent("agentId", logPathAgentId);
+  assertSafePathComponent("runId", logPathRunId);
+  const podLogPath = buildPodLogPath(logPathCompanyId, logPathAgentId, logPathRunId);
+  const claudeInvocation = `cat /tmp/prompt/prompt.txt | claude ${claudeArgsEscaped} | tee ${podLogPath}`;
+  const mainCommand = claudeInvocation;
 
   // Decide prompt delivery strategy: env var (small) or Secret volume (large).
   const promptBytes = Buffer.byteLength(prompt, "utf-8");
@@ -569,7 +504,7 @@ export function buildJobManifest(input: JobBuildInput): JobBuildResult {
         name: "write-prompt",
         image: "busybox:1.36",
         imagePullPolicy: "IfNotPresent",
-        command: ["sh", "-c", "cp /tmp/prompt-secret/prompt.txt /tmp/prompt/prompt.txt"],
+        command: ["sh", "-c", `mkdir -p /paperclip/instances/default/run-logs/${agent.companyId}/${agent.id} && cp /tmp/prompt-secret/prompt.txt /tmp/prompt/prompt.txt`],
         volumeMounts: [
           { name: "prompt", mountPath: "/tmp/prompt" },
           { name: "prompt-secret", mountPath: "/tmp/prompt-secret", readOnly: true },
@@ -584,7 +519,7 @@ export function buildJobManifest(input: JobBuildInput): JobBuildResult {
         name: "write-prompt",
         image: "busybox:1.36",
         imagePullPolicy: "IfNotPresent",
-        command: ["sh", "-c", "printf '%s' \"$PROMPT_CONTENT\" > /tmp/prompt/prompt.txt"],
+        command: ["sh", "-c", `mkdir -p /paperclip/instances/default/run-logs/${agent.companyId}/${agent.id} && printf '%s' "$PROMPT_CONTENT" > /tmp/prompt/prompt.txt`],
         env: [{ name: "PROMPT_CONTENT", value: prompt }],
         volumeMounts: [{ name: "prompt", mountPath: "/tmp/prompt" }],
         securityContext,
@@ -641,5 +576,5 @@ export function buildJobManifest(input: JobBuildInput): JobBuildResult {
     },
   };
 
-  return { job, jobName, namespace, prompt, claudeArgs, promptMetrics, promptSecret, skippedLabels };
+  return { job, jobName, namespace, prompt, claudeArgs, promptMetrics, promptSecret, skippedLabels, podLogPath };
 }
