@@ -10,6 +10,21 @@ This is a Paperclip adapter plugin that runs Claude Code agents as isolated Kube
 
 Build and publish are handled by GitHub Actions on tag push — do **not** build locally. To release a new version, bump `package.json` with `npm version` and push the tag — CI handles the rest.
 
+## Verify everything
+
+Never assume an action succeeded because the command exited 0 or because it "should" have worked. Verify the *outcome* of every action you take, especially anything async, anything that crosses a process/network/CI boundary, and anything that publishes or deploys.
+
+Required checks:
+
+- **After `git push`**: confirm the remote ref moved (`git ls-remote origin <branch>` or `gh` API) and confirm the expected workflow run was triggered. If a tag was pushed, confirm the tag exists on the remote.
+- **After triggering a CI workflow**: poll `gh run view <id>` until it completes. Do not declare success until every job in the run is `completed/success`. If it fails, pull `gh run view <id> --log-failed` and diagnose before reporting back.
+- **After a release/publish**: verify the artifact actually exists at its destination (`npm view <pkg>@<version>` for npm, registry/API check for others). A workflow that exited 0 is not proof — read the logs and verify the artifact.
+- **After file edits**: re-read the file (or run `git diff`) to confirm the change landed exactly as intended.
+- **After running tests/typecheck/build**: read the output. "It exited 0" is not enough — check that the expected number of tests ran, no suites were skipped silently, no warnings indicate the change didn't take effect.
+- **After any state-changing API/CLI call** (kubectl, gh, npm, git config, etc.): query the resulting state and confirm it matches expectations.
+
+If verification fails or is impossible, say so explicitly. Never paper over uncertainty with optimistic phrasing like "should be fine" or "looks good" — either you verified it or you didn't, and the user needs to know which.
+
 ## Common Commands
 
 ```bash
