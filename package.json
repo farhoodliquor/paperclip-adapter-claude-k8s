@@ -25,7 +25,8 @@
     "dist"
   ],
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && npm run build:ui-parser",
+    "build:ui-parser": "esbuild src/ui-parser.ts --bundle --format=cjs --target=es2020 --outfile=dist/ui-parser.js --log-level=warning",
     "clean": "rm -rf dist",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
@@ -43,6 +44,7 @@
     "@paperclipai/adapter-utils": "2026.415.0-canary.7",
     "@types/node": "^24.6.0",
     "@vitest/coverage-v8": "^4.1.4",
+    "esbuild": "^0.24.0",
     "typescript": "^5.7.3",
     "vitest": "^4.1.4"
   }
