@@ -1234,7 +1234,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       waitForJobCompletion(namespace, jobName, completionTimeoutMs, kubeconfigPath, jobObserver).then(r => { logStopSignal.stopped = true; return r; }),
     ]);
 
-    const stdout = tailResult.status === "fulfilled" ? tailResult.value : "";
+    stdout = tailResult.status === "fulfilled" ? tailResult.value : "";
 
     if (completionResult.status === "fulfilled") {
       jobTimedOut = completionResult.value.timedOut;
